@@ -3659,8 +3659,7 @@ def _edu_mail_open_item(call, user_id, db, lang, cat_short, cat_label, item_no, 
         except Exception:
             pass
         item_display_name = get_edu_mail_item_name(cat_short, item_no, db)
-        show_product_detail_with_subnav(user_id, v_name, db, display_name=item_display_name,
-                                        origin=f"edu:{cat_short}:{item_no}")
+        show_product_detail_with_subnav(user_id, v_name, db, display_name=item_display_name)
         return
 
     bm_id = get_edu_mail_bulkmail_id(cat_short, item_no, db)
@@ -3692,8 +3691,7 @@ def _edu_mail_open_item(call, user_id, db, lang, cat_short, cat_label, item_no, 
     except Exception:
         pass
     item_display_name = get_edu_mail_item_name(cat_short, item_no, db)
-    show_product_detail_with_subnav(user_id, v_name, db, display_name=item_display_name,
-                                    origin=f"edu:{cat_short}:{item_no}")
+    show_product_detail_with_subnav(user_id, v_name, db, display_name=item_display_name)
 
 EDU_MAIL_TERMS_BN = (
     "📄 <b>শর্তাবলী (Terms &amp; Conditions)</b>\n"
@@ -22229,8 +22227,14 @@ def _text_message_worker(message):
         _pending_product_cache.pop(user_id, None)
         _pending_product_origin.pop(user_id, None)
         show_shop_menu(user_id)
-        if _was_gic:       # 📬 Gmail & iCloud সার্ভিস ডিটেইল থেকে Back → শুধু Shop মেনু, সার্ভিস লিস্ট আর আসবে না
-            _gic_last_view.pop(str(user_id), None)
+        if _was_gic:       # 📬 Gmail & iCloud সার্ভিস ডিটেইল থেকে Back → আগের সার্ভিস লিস্টেও ফিরে যাও
+            _lv = _gic_last_view.get(str(user_id))
+            if _lv:
+                try:
+                    _t, _m = _gic_services_view(_lv[0], _lv[1], str(user_id))
+                    bot.send_message(user_id, _t, parse_mode="HTML", reply_markup=_m)
+                except Exception as _e:
+                    logging.error(f"gic back restore error: {_e}")
         return
     if text in (L["back"], L["cancel"], LANG["en"]["back"], LANG["bn"]["back"]):
         _pending_product_cache.pop(user_id, None)
@@ -22250,12 +22254,16 @@ def _text_message_worker(message):
             _show_edu_mail_submenu(user_id, db_quick)
         elif last_origin == "buy_proxy":
             handle_buy_proxy(user_id, db_quick)
-        elif isinstance(last_origin, str) and last_origin.startswith("edu:"):
-            _edu_mail_restore_from_origin(user_id, last_origin, db_quick)   # Edu Mail item → আগের Categories/item লিস্টে
         elif last_origin == "gic":
             # 📬 Gmail & iCloud সার্ভিস ডিটেইল থেকে Back → Product কিবোর্ড ফিরিয়ে আনো + আগের সার্ভিস লিস্টেই ফেরো
             show_shop_menu(user_id, db_quick)
-            _gic_last_view.pop(str(user_id), None)     # সার্ভিস লিস্ট আর পুনরায় পাঠানো হবে না
+            _lv = _gic_last_view.get(str(user_id))
+            if _lv:
+                try:
+                    _t, _m = _gic_services_view(_lv[0], _lv[1], str(user_id))
+                    bot.send_message(user_id, _t, parse_mode="HTML", reply_markup=_m)
+                except Exception as _e:
+                    logging.error(f"gic back restore error: {_e}")
         elif last_origin == "gmail":
             show_shop_menu(user_id, db_quick)          # 📮 Gmail API সার্ভিস থেকে Back -> Product মেনুতে
         else:
@@ -22962,30 +22970,6 @@ def _edu_mail_categories_view(user_id=None):
         "Select a category:"
     )
     return text, markup
-
-def _edu_mail_restore_from_origin(user_id, origin, db=None):
-    """Edu Mail item (Buy 1pcs/Bulk Buy স্ক্রিন) থেকে 🔙 Back → আগের অবস্থায় ফেরা:
-    নিচের Categories কীবোর্ড ফিরে আসবে + ওই ক্যাটাগরির (যে পেজে item ছিল সেই পেজের) item লিস্ট।"""
-    if db is None:
-        db = load_db()
-    try:
-        _, cat_short, item_no = origin.split(":", 2)
-    except ValueError:
-        show_shop_menu(user_id, db); return
-    try:
-        _disabled = get_edu_mail_disabled_items(cat_short, db)
-        visible = [str(n) for n in get_edu_mail_active_items(cat_short, db) if n not in _disabled]
-        page = visible.index(str(item_no)) // EDU_MAIL_ITEM_PAGE_SIZE + 1
-    except Exception:
-        page = 1
-    try:
-        _ct, _cm = _edu_mail_categories_view(user_id)
-        bot.send_message(user_id, _ct, parse_mode="HTML", reply_markup=_cm)   # নিচের Categories কীবোর্ড ফেরত
-        _pt, _pm = _edu_mail_generic_page_view(cat_short, page, db, user_id)
-        bot.send_message(user_id, _pt, parse_mode="HTML", reply_markup=_pm)   # item লিস্ট
-    except Exception as _e:
-        logging.error(f"edu mail back restore error: {_e}")
-        show_shop_menu(user_id, db)
 
 def _show_edu_mail_submenu(user_id, db=None):
     """
