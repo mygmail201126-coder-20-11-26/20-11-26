@@ -8323,20 +8323,39 @@ def start_sms_server():
     # ⚡ Background periodic flush — API dashboard changes MySQL এ save হবে
     threading.Thread(target=_schedule_periodic_flush, daemon=True, name="dashboard_flush").start()
 
-    try:
-        bot.remove_webhook()
-        import time as _tw
-        _tw.sleep(0.5)
-        bot.set_webhook(
-            url=WEBHOOK_URL,
-            allowed_updates=[
-                "message", "callback_query", "chat_member",
-                "my_chat_member", "channel_post", "inline_query"
-            ]
-        )
-        print(f"✅ Telegram Webhook set: {WEBHOOK_URL}")
-    except Exception as e:
-        print(f"❌ Webhook set failed: {e}")
+    _allowed = ["message", "callback_query", "chat_member",
+                "my_chat_member", "channel_post", "inline_query"]
+    if os.environ.get("USE_POLLING", "").strip() in ("1", "true", "True", "yes"):
+        # 🔁 POLLING MODE — Railway ডোমেইন/পোর্ট ছাড়াই বট কাজ করে (Variables এ USE_POLLING=1)
+        try:
+            bot.remove_webhook()
+        except Exception as e:
+            print(f"⚠️ remove_webhook failed: {e}")
+
+        def _poll_loop():
+            _offset = None
+            print("✅ Polling mode চালু — webhook লাগবে না")
+            while True:
+                try:
+                    _ups = bot.get_updates(offset=_offset, timeout=35, long_polling_timeout=30,
+                                           allowed_updates=_allowed)
+                    for _u in _ups:
+                        _offset = _u.update_id + 1
+                        _EXECUTOR.submit(_process_update_maintenance_aware, _u)
+                except Exception as _pe:
+                    logging.error(f"polling error: {_pe}")
+                    _time_module.sleep(3)
+
+        threading.Thread(target=_poll_loop, daemon=True, name="tg_polling").start()
+    else:
+        try:
+            bot.remove_webhook()
+            import time as _tw
+            _tw.sleep(0.5)
+            bot.set_webhook(url=WEBHOOK_URL, allowed_updates=_allowed)
+            print("✅ Telegram Webhook set (URL লগে দেখানো হচ্ছে না — টোকেন সুরক্ষার জন্য)")
+        except Exception as e:
+            print(f"❌ Webhook set failed: {e}")
 
     PORT = int(os.environ.get("PORT", 5000))
 
@@ -39463,5 +39482,5 @@ if __name__ == "__main__":
     # SMS + Telegram Webhook server — foreground এ চালাও
     # infinity_polling বন্ধ — Webhook mode এ switch হয়েছে ✅
     print("🌐 Starting Webhook+SMS server on port 5000...")
-    print(f"🔗 Telegram Webhook URL: {WEBHOOK_URL}")
+    print("🔗 Telegram Webhook URL: (token সুরক্ষার জন্য লুকানো)")
     start_sms_server()
