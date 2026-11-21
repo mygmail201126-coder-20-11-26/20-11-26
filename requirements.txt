@@ -1,8 +1,7 @@
 pyTelegramBotAPI
-flask
-firebase-admin
+requests
+Flask
+gunicorn
+PyMySQL
 openpyxl
 pytz
-requests
-pymysql
-cryptogra
