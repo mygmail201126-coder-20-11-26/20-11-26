@@ -1568,6 +1568,13 @@ def apply_bot_settings_overrides(db=None):
         v = st.get("binance_pay_uid")
         if v:
             BINANCE_PAY_UID = str(v)
+        # 📢 Force Join চ্যানেল (Bot Settings → Force Join Channels) — CHANNELS লিস্ট in-place বদলায়
+        v = st.get("force_channels")
+        if v:
+            _fcl = json.loads(v) if isinstance(v, str) else v
+            if isinstance(_fcl, list):
+                CHANNELS[:] = [{"id": str(c["id"]), "link": str(c["link"]), "name": str(c.get("name") or "")}
+                               for c in _fcl if isinstance(c, dict) and c.get("id") and c.get("link")]
     except Exception as _e:
         logging.warning(f"apply_bot_settings_overrides error: {_e}")
 
@@ -7945,10 +7952,12 @@ def handle_chat_member_update(update: types.ChatMemberUpdated):
             try:
                 goodbye_markup = types.InlineKeyboardMarkup(row_width=2)
                 # Row 1: Main Channel + Live History
-                goodbye_markup.row(
-                    InlineBtn("📢 Main Channel", style="primary", url=CHANNELS[0]["link"]),
-                    InlineBtn("📜 Live History", style="primary", url=CHANNELS[1]["link"] if len(CHANNELS) > 1 else CHANNELS[0]["link"])
-                )
+                if CHANNELS:
+                    goodbye_markup.row(
+                        InlineBtn("📢 " + (CHANNELS[0].get("name") or "Main Channel"), style="primary", url=CHANNELS[0]["link"]),
+                        InlineBtn("📜 " + ((CHANNELS[1].get("name") or "Live History") if len(CHANNELS) > 1 else (CHANNELS[0].get("name") or "Live History")),
+                                  style="primary", url=CHANNELS[1]["link"] if len(CHANNELS) > 1 else CHANNELS[0]["link"])
+                    )
                 # Row 2: Come Back button
                 goodbye_markup.add(
                     InlineBtn("🔙 Come Back", style="primary", callback_data="goodbye_come_back")
@@ -13930,7 +13939,7 @@ def get_join_markup(user_id):
     markup = types.InlineKeyboardMarkup(row_width=1)
     for i, ch in enumerate(CHANNELS, 1):
         markup.add(InlineBtn(
-            LANG[lang]["join_channel_btn"].format(n=i), style="success", url=ch['link']))
+            _ch_btn_text(ch, i, lang), style="success", url=ch['link']))
     markup.add(InlineBtn(LANG[lang]["verify_join"], style="success", callback_data="check_join"))
     return markup
 
@@ -13964,7 +13973,7 @@ def enforce_join_gate(user_id, call, db=None):
     _lang_now = db.get("users", {}).get(user_id, {}).get("lang", "en")
     _join_markup = types.InlineKeyboardMarkup(row_width=1)
     for i, ch in enumerate(CHANNELS, 1):
-        _btn_text = LANG.get(_lang_now, LANG["en"])["join_channel_btn"].format(n=i)
+        _btn_text = _ch_btn_text(ch, i, _lang_now)
         _join_markup.add(InlineBtn(_btn_text, style="primary", url=ch["link"]))
     _join_markup.add(InlineBtn(
         LANG.get(_lang_now, LANG["en"])["verify_join"], style="success", callback_data="check_join"))
@@ -16456,9 +16465,8 @@ def _cdkey_buy(uid, lang, st):
             balance = float((db.get("users", {}).get(uid, {}) or {}).get("balance", 0) or 0)
             keys = _cdkey_stock_list(pid, kid, db)
             if not keys:
-                bot.send_message(uid, "❌ <b>স্টক শেষ!</b>\nএই প্যাকেজটি এখন স্টকে নেই, পরে আবার চেষ্টা করুন।" if lang == "bn"
-                                 else "❌ <b>Out of stock!</b>\nThis package is currently unavailable, please try later.",
-                                 parse_mode="HTML")
+                # ⏳ স্টকে নেই → অর্ডার Pending, Admin কনফার্ম করে ডেটা দিলে ইউজারের কাছে যাবে
+                _po_create(uid, "cdkey", f"{name} - {pname_short} {CDKEY_TAG}".strip(), 1, price, db=db, lang=lang)
                 return
             if balance < price:
                 shortage = round(price - balance, 2)
@@ -17009,6 +17017,8 @@ def _ispk_on(x):
     return (x or {}).get("on", True) is not False
 
 def _ispk_pkg_label(pkg):
+    if not _ispk_priced(pkg):               # দাম সেট না থাকলেও প্যাকেজ লিস্টে দেখাবে
+        return f"{pkg.get('name', 'Package')}"
     return f"{pkg.get('name', 'Package')} • {_ispk_fmt_price(pkg.get('price', 0))}৳"
 
 def _ispk_priced(pkg):
@@ -17063,7 +17073,7 @@ def _ispk_packages_view(lang, pid):
     prov = _ispk_prov(_ispk_cfg(), pid)
     if not prov or not _ispk_on(prov):
         return ("⚠️ এই প্রোভাইডার এখন বন্ধ আছে।" if lang == "bn" else "⚠️ This provider is currently unavailable."), None
-    pks = [k for k in prov.get("pk", []) if _ispk_on(k) and _ispk_priced(k)]
+    pks = [k for k in prov.get("pk", []) if _ispk_on(k)]
     if pks:
         text = (f"🌐 <b>{_esc(prov['name'])}</b>\n\nএকটা প্যাকেজ বেছে নিন 👇" if lang == "bn"
                 else f"🌐 <b>{_esc(prov['name'])}</b>\n\nSelect a package 👇")
@@ -17081,7 +17091,8 @@ def _ispk_detail_text(prov, pkg):
     lines = [
         f"📡 <b>Provider:</b> {_esc(prov['name'])}",
         f"📦 <b>Package:</b> {_esc(pkg['name'])}",
-        f"💰 <b>Price:</b> {_ispk_fmt_price(pkg['price'])}৳",
+        (f"💰 <b>Price:</b> {_ispk_fmt_price(pkg['price'])}৳" if _ispk_priced(pkg)
+         else "💰 <b>Price:</b> —"),
     ]
     tut = _ispk_tutorial_url(prov)
     if tut:                                   # ভিডিও লিংক সেট থাকলেই দেখাবে
@@ -17121,7 +17132,7 @@ def _ispk_user_cb_worker(call):
             pid, kid = d[len("ispk_pk_"):].split("_", 1)
             prov = _ispk_prov(_ispk_cfg(), pid)
             pkg = _ispk_pkg(prov, kid)
-            if not pkg or not _ispk_on(prov) or not _ispk_on(pkg) or not _ispk_priced(pkg):
+            if not pkg or not _ispk_on(prov) or not _ispk_on(pkg):
                 bot.send_message(user_id, "⚠️ প্যাকেজটি এখন বন্ধ আছে।" if lang == "bn" else "⚠️ This package is currently unavailable.")
                 return
             _ispk_state[user_id] = {"pid": pid, "kid": kid, "ts": _time_module.time()}
@@ -17192,7 +17203,11 @@ def _ispk_buy(uid, lang, st):
                 return
             prov = _ispk_prov(_ispk_cfg(db), pid)
             pkg = _ispk_pkg(prov, kid)
-            if not pkg or not _ispk_on(prov) or not _ispk_on(pkg) or not _ispk_priced(pkg):
+            if pkg and _ispk_on(prov) and _ispk_on(pkg) and not _ispk_priced(pkg):
+                bot.send_message(uid, "⚠️ এই প্যাকেজের দাম এখনো সেট করা হয়নি, একটু পরে চেষ্টা করুন।" if lang == "bn"
+                                 else "⚠️ This package's price isn't set yet, please try later.")
+                return
+            if not pkg or not _ispk_on(prov) or not _ispk_on(pkg):
                 _ispk_state.pop(uid, None)
                 bot.send_message(uid, "⚠️ প্যাকেজটি এখন বন্ধ আছে বা আর নেই।" if lang == "bn" else "⚠️ This package is currently unavailable.")
                 return
@@ -17201,9 +17216,8 @@ def _ispk_buy(uid, lang, st):
             balance = float((db.get("users", {}).get(uid, {}) or {}).get("balance", 0) or 0)
             keys = _ispk_stock_list(pid, kid, db)
             if not keys:
-                bot.send_message(uid, "❌ <b>স্টক শেষ!</b>\nএই প্যাকেজটি এখন স্টকে নেই, পরে আবার চেষ্টা করুন।" if lang == "bn"
-                                 else "❌ <b>Out of stock!</b>\nThis package is currently unavailable, please try later.",
-                                 parse_mode="HTML")
+                # ⏳ স্টকে নেই → অর্ডার Pending, Admin কনফার্ম করে ডেটা দিলে ইউজারের কাছে যাবে
+                _po_create(uid, "isp", f"{name} - {pname_short}", 1, price, db=db, lang=lang)
                 return
             if balance < price:
                 shortage = round(price - balance, 2)
@@ -17625,6 +17639,328 @@ def _ispk_admin_stock_step(message, pid, kid):
         _ispk_save_stock(pid, kid, cur)
     _ispk_done(uid, f"✅ <b>{added} টি key যোগ হয়েছে</b>\n📦 মোট স্টক: {len(cur)}",
                 _ispk_admin_package_view(pid, kid))
+
+
+# ═══════════════════════════════════════════════════════════
+# ⏳ PENDING ORDER — GB Proxy / ISP Proxy / All CD Key / All VPN
+#    স্টকে যা আছে সেটুকু সাথে সাথে ডেলিভারি হয়। স্টকে না থাকলে (বা কম থাকলে বাকিটুকুর জন্য)
+#    অর্ডার "⏳ Pending" হয়, ইউজারের ব্যালেন্স থেকে টাকা hold হয় এবং Admin এর কাছে রিকোয়েস্ট যায়।
+#    Admin "✅ Confirm & Send Data" চেপে ডেটা (লেখা বা ফাইল) দিলে সেটা ইউজারের কাছে চলে যায়।
+#    Admin "❌ Reject" করলে টাকা ফেরত যায়। Admin Panel → ⏳ Pending Orders থেকেও সব দেখা যায়।
+#    ✅ ডাটা: db["settings"]["po_shop"]["orders"] (শুধু Pending গুলো; শেষ হলে মুছে যায়)
+# ═══════════════════════════════════════════════════════════
+_PO_LOCK = threading.RLock()
+_PO_KIND_LABEL = {"gb": "GB Proxy", "isp": "ISP Proxy", "cdkey": "CD Key", "vpn": "All VPN"}
+
+
+def _po_scope(product_name):
+    """GB Proxy / All VPN এর সাধারণ (local stock) প্রোডাক্ট হলে "gb"/"vpn", নাহলে None।
+    API প্রোডাক্ট (Bulkmail/Real Proxy ইত্যাদি) এর আওতায় পড়ে না।"""
+    try:
+        if not isinstance(product_name, str) or product_name in API_PRODUCTS:
+            return None
+        if _is_vpn_category_product(product_name):
+            return "vpn"
+        if _is_proxy_provider_product(product_name):
+            return "gb"
+    except Exception:
+        pass
+    return None
+
+
+def _po_load(db=None):
+    if db is None:
+        db = load_db()
+    raw = (((db.get("settings", {}) or {}).get("po_shop")) or {}).get("orders")
+    if not raw:
+        return {}
+    try:
+        d = json.loads(raw) if isinstance(raw, str) else raw
+        return d if isinstance(d, dict) else {}
+    except Exception as e:
+        logging.error(f"po load error: {e}")
+        return {}
+
+
+def _po_store(orders):
+    update_db_path("/settings/po_shop/orders", json.dumps(orders, ensure_ascii=False), _async=False)
+
+
+def _po_admin_ids():
+    ids = [str(ADMIN_ID)]
+    try:
+        for a in (get_extra_admins() or []):
+            if str(a) not in ids:
+                ids.append(str(a))
+    except Exception:
+        pass
+    return ids
+
+
+def _po_admin_markup(oid):
+    mk = types.InlineKeyboardMarkup(row_width=1)
+    mk.add(InlineBtn("✅ Confirm & Send Data", style="success", callback_data=f"pndo_ok_{oid}"),
+           InlineBtn("❌ Reject & Refund", style="danger", callback_data=f"pndo_no_{oid}"))
+    return mk
+
+
+def _po_admin_text(o, head="⏳ <b>নতুন Pending Order</b>"):
+    return (f"{head}\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <b>Order ID:</b> <code>{o['id']}</code>\n"
+            f"👤 <b>User ID:</b> <code>{o['uid']}</code>\n"
+            f"🗂 <b>Shop:</b> {_PO_KIND_LABEL.get(o.get('kind'), o.get('kind', ''))}\n"
+            f"📦 <b>Product:</b> {_esc(o['title'])}\n"
+            f"🔢 <b>Quantity:</b> {o['qty']} pcs\n"
+            f"💰 <b>Total (hold):</b> {_ispk_fmt_price(o['total'])} BDT\n"
+            f"📅 <b>Date:</b> {o['date']}\n\n"
+            f"<i>স্টকে নেই — ডেটা দিয়ে Confirm করলে ইউজারের কাছে চলে যাবে।</i>")
+
+
+def _po_create(uid, kind, title, qty, unit_price, db=None, lang=None, product_name=None):
+    """স্টক না থাকা অর্ডারকে Pending বানায়: ব্যালেন্স থেকে টাকা hold, অর্ডার হিস্ট্রিতে Pending এন্ট্রি,
+    ইউজারকে "Pending" মেসেজ, Admin কে রিকোয়েস্ট। সফল হলে True।"""
+    uid = str(uid)
+    if lang is None:
+        lang = get_user_lang(uid)
+    qty = int(qty)
+    unit_price = round(float(unit_price), 2)
+    total = round(unit_price * qty, 2)
+    with _PO_LOCK:
+        if db is None:
+            db = load_db()
+        user = (db.get("users", {}) or {}).get(uid)
+        if user is None:
+            return False
+        balance = float(user.get("balance", 0) or 0)
+        if balance + 0.01 < total:
+            short = round(total - balance, 2)
+            bot.send_message(uid,
+                (f"❌ ব্যালেন্স অপর্যাপ্ত! প্রয়োজন ৳{_ispk_fmt_price(total)}, আপনার আছে ৳{balance} (৳{short} কম)."
+                 if lang == "bn" else
+                 f"❌ Insufficient balance! Need ৳{_ispk_fmt_price(total)}, you have ৳{balance} (short ৳{short})."))
+            return False
+        new_balance = round(balance - total, 2)
+        user["balance"] = new_balance
+        update_db_path(f"/users/{uid}/balance", new_balance, _async=False)
+        oid = f"PND-{uuid.uuid4().hex[:8].upper()}"
+        now_str = get_now()
+        orders = _normalize_orders_list(user.get("orders", []))
+        orders.append({
+            "id": oid, "order_id": oid, "product_name": f"{title} (⏳ Pending)", "product": f"{title} (⏳ Pending)",
+            "quantity": qty, "price_per_unit": unit_price, "price": unit_price, "total": total,
+            "date": now_str, "status": "pending", "source": "pending", "type": f"pending_{kind}",
+        })
+        user["orders"] = orders
+        update_db_path(f"/users/{uid}/orders", orders, _async=False)
+        po = _po_load(db)
+        rec = {"id": oid, "uid": uid, "kind": kind, "title": title, "qty": qty, "unit": unit_price,
+               "total": total, "date": now_str, "product_name": product_name or ""}
+        po[oid] = rec
+        _po_store(po)
+    try:
+        bot.send_message(uid,
+            (f"⏳ <b>অর্ডার Pending!</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+             f"📦 <b>Product:</b> {_esc(title)}\n🔢 <b>Quantity:</b> {qty} pcs\n"
+             f"💵 <b>Total:</b> {_ispk_fmt_price(total)}৳\n💰 <b>New Balance:</b> {new_balance}৳\n"
+             f"🆔 <b>Order ID:</b> <code>{oid}</code>\n\n"
+             f"এই মুহূর্তে স্টকে নেই। আপনার রিকোয়েস্ট Admin এর কাছে পাঠানো হয়েছে — "
+             f"কনফার্ম হলেই ডেটা এখানে চলে আসবে। ✅\n"
+             f"<i>Reject হলে টাকা ফেরত পাবেন।</i>") if lang == "bn" else
+            (f"⏳ <b>Order Pending!</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+             f"📦 <b>Product:</b> {_esc(title)}\n🔢 <b>Quantity:</b> {qty} pcs\n"
+             f"💵 <b>Total:</b> {_ispk_fmt_price(total)}৳\n💰 <b>New Balance:</b> {new_balance}৳\n"
+             f"🆔 <b>Order ID:</b> <code>{oid}</code>\n\n"
+             f"This item is out of stock right now. Your request was sent to the admin — "
+             f"you'll receive the data here as soon as it is confirmed. ✅\n"
+             f"<i>If rejected, you will be refunded.</i>"),
+            parse_mode="HTML")
+    except Exception as e:
+        logging.warning(f"po user notify error: {e}")
+    for aid in _po_admin_ids():
+        try:
+            bot.send_message(aid, _po_admin_text(rec), parse_mode="HTML", reply_markup=_po_admin_markup(oid))
+        except Exception as e:
+            logging.warning(f"po admin notify error ({aid}): {e}")
+    return True
+
+
+def _po_mark_user_order(uid, oid, remove=False, title=None):
+    """ইউজারের অর্ডার হিস্ট্রিতে Pending এন্ট্রি আপডেট (completed) বা মুছে ফেলো (refund)।"""
+    try:
+        db = load_db()
+        user = (db.get("users", {}) or {}).get(str(uid))
+        if not user:
+            return
+        orders = _normalize_orders_list(user.get("orders", []))
+        out = []
+        for o in orders:
+            if isinstance(o, dict) and o.get("id") == oid:
+                if remove:
+                    continue
+                o = dict(o)
+                o["status"] = "completed"
+                o["source"] = "admin_confirmed"
+                if title:
+                    o["product_name"] = title
+                    o["product"] = title
+            out.append(o)
+        user["orders"] = out
+        update_db_path(f"/users/{uid}/orders", out, _async=False)
+    except Exception as e:
+        logging.error(f"po mark order error: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("pndo_") or call.data == "admin_pndo_list")
+def handle_po_callback(call):
+    if not is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "❌ Admin access only!", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    _EXECUTOR.submit(_po_cb_worker, call)
+
+
+def _po_list_view():
+    po = _po_load()
+    mk = types.InlineKeyboardMarkup(row_width=1)
+    if not po:
+        return "⏳ <b>Pending Orders</b>\n\n✅ কোনো Pending অর্ডার নেই।", mk
+    for oid, o in sorted(po.items(), key=lambda kv: kv[1].get("date", "")):
+        mk.add(InlineBtn(f"{oid} • {o.get('title', '')} ×{o.get('qty', 1)}", style="primary",
+                         callback_data=f"pndo_view_{oid}"))
+    return f"⏳ <b>Pending Orders ({len(po)})</b>\n\nএকটা বেছে নিন 👇", mk
+
+
+def _po_cb_worker(call):
+    try:
+        chat_id, d = call.message.chat.id, call.data
+        if d == "admin_pndo_list":
+            t_, m_ = _po_list_view()
+            bot.send_message(chat_id, t_, parse_mode="HTML", reply_markup=m_)
+            return
+        action, oid = d.split("_", 2)[1], d.split("_", 2)[2]
+        o = _po_load().get(oid)
+        if not o:
+            bot.send_message(chat_id, f"ℹ️ <code>{oid}</code> — এই অর্ডার আগেই হ্যান্ডেল হয়ে গেছে (বা নেই)।", parse_mode="HTML")
+            return
+        if action == "view":
+            bot.send_message(chat_id, _po_admin_text(o, "⏳ <b>Pending Order</b>"), parse_mode="HTML",
+                             reply_markup=_po_admin_markup(oid))
+        elif action == "ok":
+            msg = bot.send_message(chat_id,
+                f"📥 <b>{_esc(o['title'])} × {o['qty']}</b> এর ডেটা পাঠান\n"
+                f"<i>(লেখা পেস্ট করুন, অথবা .txt/.csv/যেকোনো ফাইল দিন)</i>\n🆔 <code>{oid}</code>",
+                parse_mode="HTML", reply_markup=get_cancel_button(chat_id))
+            bot.register_next_step_handler(msg, _po_data_step, oid)
+        elif action == "no":
+            mk = types.InlineKeyboardMarkup(row_width=2)
+            mk.add(InlineBtn("✅ হ্যাঁ, Reject করুন", style="danger", callback_data=f"pndo_nok_{oid}"),
+                   InlineBtn("↩️ না", style="primary", callback_data=f"pndo_view_{oid}"))
+            bot.send_message(chat_id,
+                f"⚠️ <code>{oid}</code> Reject করে ইউজারকে <b>{_ispk_fmt_price(o['total'])}৳</b> ফেরত দেবেন?",
+                parse_mode="HTML", reply_markup=mk)
+        elif action == "nok":
+            _po_reject(chat_id, oid)
+    except Exception as e:
+        logging.error(f"po cb error: {e}\n{traceback.format_exc()}")
+
+
+def _po_reject(admin_chat, oid):
+    with _PO_LOCK:
+        po = _po_load()
+        o = po.pop(oid, None)
+        if not o:
+            bot.send_message(admin_chat, "ℹ️ এই অর্ডার আগেই হ্যান্ডেল হয়ে গেছে।")
+            return
+        _po_store(po)
+        db = load_db()
+        user = (db.get("users", {}) or {}).get(o["uid"])
+        if user is not None:
+            nb = round(float(user.get("balance", 0) or 0) + float(o["total"]), 2)
+            user["balance"] = nb
+            update_db_path(f"/users/{o['uid']}/balance", nb, _async=False)
+    _po_mark_user_order(o["uid"], oid, remove=True)
+    lang = get_user_lang(o["uid"])
+    try:
+        bot.send_message(o["uid"],
+            (f"❌ <b>অর্ডার বাতিল হয়েছে</b>\n🆔 <code>{oid}</code>\n📦 {_esc(o['title'])} × {o['qty']}\n"
+             f"💰 <b>{_ispk_fmt_price(o['total'])}৳</b> আপনার ব্যালেন্সে ফেরত দেওয়া হয়েছে।") if lang == "bn" else
+            (f"❌ <b>Order cancelled</b>\n🆔 <code>{oid}</code>\n📦 {_esc(o['title'])} × {o['qty']}\n"
+             f"💰 <b>{_ispk_fmt_price(o['total'])}৳</b> has been refunded to your balance."),
+            parse_mode="HTML")
+    except Exception:
+        pass
+    bot.send_message(admin_chat, f"✅ <code>{oid}</code> Reject করা হয়েছে, ৳{_ispk_fmt_price(o['total'])} ফেরত গেছে।", parse_mode="HTML")
+
+
+def _po_data_step(message, oid):
+    """Admin এর পাঠানো ডেটা (লেখা বা ফাইল) ইউজারকে ডেলিভার করে অর্ডার সম্পন্ন করে।"""
+    aid = str(message.chat.id)
+    if not is_admin(aid):
+        return
+    ctype = getattr(message, "content_type", "text")
+    if ctype == "text" and (message.text or "").strip() in _ispk_cancel_texts():
+        bot.send_message(aid, f"❎ বাতিল। <code>{oid}</code> এখনো Pending আছে (Admin Panel → ⏳ Pending Orders)।",
+                         parse_mode="HTML", reply_markup=get_main_menu(aid))
+        return
+    o = _po_load().get(oid)
+    if not o:
+        bot.send_message(aid, "ℹ️ এই অর্ডার আগেই হ্যান্ডেল হয়ে গেছে।", reply_markup=get_main_menu(aid))
+        return
+    if ctype not in ("text", "document"):
+        msg = bot.send_message(aid, "❌ লেখা পেস্ট করুন অথবা ফাইল (document) দিন।", reply_markup=get_cancel_button(aid))
+        bot.register_next_step_handler(msg, _po_data_step, oid)
+        return
+    body = (message.text or "").strip() if ctype == "text" else ""
+    if ctype == "text" and not body:
+        msg = bot.send_message(aid, "❌ ডেটা ফাঁকা। আবার পাঠান।", reply_markup=get_cancel_button(aid))
+        bot.register_next_step_handler(msg, _po_data_step, oid)
+        return
+    uid = o["uid"]
+    lang = get_user_lang(uid)
+    head = (f"✅ <b>Order Delivered!</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 <b>Product:</b> {_esc(o['title'])}\n🔢 <b>Quantity:</b> {o['qty']} pcs\n"
+            f"💵 <b>Paid:</b> {_ispk_fmt_price(o['total'])}৳\n🆔 <b>Order ID:</b> <code>{oid}</code>")
+    tail = "\n\n✅ ডেটা সাবধানে সংরক্ষণ করুন।" if lang == "bn" else "\n\n✅ Please save this data securely."
+    # আগে pending থেকে সরাও (ডাবল-ডেলিভারি ঠেকাতে), পাঠাতে ব্যর্থ হলে আবার ফেরত রাখো
+    with _PO_LOCK:
+        po = _po_load()
+        rec = po.pop(oid, None)
+        if not rec:
+            bot.send_message(aid, "ℹ️ এই অর্ডার আগেই হ্যান্ডেল হয়ে গেছে।", reply_markup=get_main_menu(aid))
+            return
+        _po_store(po)
+    try:
+        if ctype == "document":
+            bot.send_document(uid, message.document.file_id, caption=head + tail, parse_mode="HTML")
+        elif len(body) <= 3000:
+            bot.send_message(uid, head + f"\n\n📥 <b>Data:</b>\n<code>{_esc(body)}</code>" + tail, parse_mode="HTML")
+        else:
+            import io as _po_io
+            bio = _po_io.BytesIO(body.encode("utf-8"))
+            bio.name = f"{oid}.txt"
+            bot.send_document(uid, bio, caption=head + tail, parse_mode="HTML")
+    except Exception as e:
+        with _PO_LOCK:
+            po = _po_load()
+            po[oid] = rec
+            _po_store(po)
+        logging.error(f"po deliver error: {e}")
+        bot.send_message(aid, f"❌ ইউজারকে পাঠানো যায়নি: <code>{_esc(e)}</code>\n"
+                              f"অর্ডার এখনো Pending আছে — পরে আবার চেষ্টা করুন।",
+                         parse_mode="HTML", reply_markup=get_main_menu(aid))
+        return
+    _po_mark_user_order(uid, oid, title=o["title"])
+    bot.send_message(aid, f"✅ <code>{oid}</code> ডেলিভারি সম্পন্ন!", parse_mode="HTML", reply_markup=get_main_menu(aid))
+    try:
+        bot.send_message(LOG_CHANNEL_ID,
+            f"🛒 <b>Purchase Successful!</b>🎉\n\n"
+            f"👤 <b>User ID:</b> <code>{mask_id(uid)}</code>\n"
+            f"📦 <b>Product:</b> {_esc(o['title'])}\n🔢 <b>Quantity:</b> {o['qty']} pcs\n"
+            f"💰 <b>Total:</b> {_ispk_fmt_price(o['total'])} BDT\n"
+            f"🆔 <b>Order ID:</b> <code>{mask_id(oid)}</code>\n"
+            f"✅ <b>Status:</b> Delivered (Admin Confirmed)\n📅 <b>Date:</b> {get_now()}", parse_mode="HTML")
+    except Exception:
+        pass
 
 
 @bot.callback_query_handler(func=lambda call: (
@@ -22927,7 +23263,7 @@ def _text_message_worker(message):
             _lang_now = _lang_cache.get(user_id, 'en')
             _join_markup = types.InlineKeyboardMarkup(row_width=1)
             for i, ch in enumerate(CHANNELS, 1):
-                _btn_text = LANG.get(_lang_now, LANG['en'])['join_channel_btn'].format(n=i)
+                _btn_text = _ch_btn_text(ch, i, _lang_now)
                 _join_markup.add(InlineBtn(_btn_text, style="primary", url=ch['link']))
             _join_markup.add(InlineBtn(
                 LANG.get(_lang_now, LANG['en'])['verify_join'], style="success", callback_data='check_join'))
@@ -23973,7 +24309,13 @@ def show_product_detail_with_subnav(user_id, product_name, db=None, display_name
     # ✅ FIX: Out of Stock হলে "নিচে অপশন বেছে নিন" prompt দেখানোর দরকার নেই —
     # কেনার কোনো valid অপশন নেই তাই এই লাইনটা suppress করা হচ্ছে।
     _is_out_of_stock = "Out of Stock" in stock_line
-    if not _is_out_of_stock:
+    if _is_out_of_stock and _po_scope(product_name):
+        # ⏳ GB Proxy / VPN — স্টক না থাকলেও অর্ডার করা যাবে (Pending → Admin কনফার্ম করলে ডেটা আসবে)
+        detail_msg += ("\n⏳ <i>স্টকে নেই — অর্ডার করলে Pending হবে, Admin কনফার্ম করলে ডেটা পাবেন।</i>"
+                       if get_user_lang(user_id) == "bn" else
+                       "\n⏳ <i>Out of stock — your order will be Pending until the admin confirms and sends the data.</i>")
+        detail_msg += f"\n\n<i>নিচে অপশন বেছে নিন 👇</i>"
+    elif not _is_out_of_stock:
         detail_msg += f"\n\n<i>নিচে অপশন বেছে নিন 👇</i>"
 
     # ── Sub-product check: Gmail বা Facebook হলে sub-buttons দেখাও ──
@@ -24098,7 +24440,7 @@ def handle_single_buy_from_keyboard(user_id, db):
     stock = get_stock_count(product_name)
     # API product — API তে live stock থাকলে allow করো (local 0 হলেও চলবে)
     _is_api_single = product_name in API_PRODUCTS
-    if stock <= 0 and not _is_api_single:
+    if stock <= 0 and not _is_api_single and not _po_scope(product_name):   # GB/VPN: স্টক না থাকলে Pending হবে
         bot.send_message(user_id,
             f"🔴 <b>Out of Stock!</b>\n\n"
             f"😔 দুঃখিত! <b>{_proxy_display_name(product_name)}</b> এখন স্টকে নেই।\n"
@@ -24214,7 +24556,7 @@ def handle_bulk_buy_from_keyboard(user_id, db):
     stock_now = get_stock_count(product_name)
     # API product — API তে live stock থাকলে allow করো (local 0 হলেও চলবে)
     _is_api_bulk = product_name in API_PRODUCTS
-    if stock_now <= 0 and not _is_api_bulk:
+    if stock_now <= 0 and not _is_api_bulk and not _po_scope(product_name):   # GB/VPN: স্টক না থাকলে Pending হবে
         bot.send_message(user_id,
             f"🔴 <b>Out of Stock!</b>\n\n"
             f"😔 দুঃখিত! <b>{_proxy_display_name(product_name)}</b> এখন স্টকে নেই।\n"
@@ -24300,7 +24642,7 @@ def receive_bulk_quantity(message, product_name, price, promo_code=None):
             reply_markup=_bulk_back, parse_mode="HTML")
         bot.register_next_step_handler(msg, lambda m: receive_bulk_quantity(m, product_name, price, promo_code)); return
     stock = get_stock_count(product_name)
-    if stock < quantity:
+    if stock < quantity and not _po_scope(product_name):   # GB/VPN: কম স্টক হলে যতটুকু আছে দেওয়া হবে, বাকিটা Pending
         bot.send_message(user_id,
             t(user_id, "insufficient_stock", qty=quantity, stock=stock),
             reply_markup=get_main_menu(user_id), parse_mode="HTML"); return
@@ -25400,11 +25742,23 @@ def process_purchase(user_id, product_name, quantity, price, total_price, displa
         with stock_lock:
                 # Lock এর ভেতরে fresh stock count — অন্য thread ইতিমধ্যে নিয়ে নিতে পারে
                 stock = get_stock_count(product_name)
+                _po_rem = 0          # ⏳ স্টকে কম থাকলে বাকি যতটা — Pending হবে
                 if stock < quantity:
-                    bot.send_message(user_id,
-                        t(user_id, "insufficient_stock", qty=quantity, stock=stock),
-                        reply_markup=get_main_menu(user_id), parse_mode="HTML")
-                    return
+                    _po_kind = _po_scope(product_name)
+                    if not _po_kind:
+                        bot.send_message(user_id,
+                            t(user_id, "insufficient_stock", qty=quantity, stock=stock),
+                            reply_markup=get_main_menu(user_id), parse_mode="HTML")
+                        return
+                    if stock <= 0:
+                        # স্টকে একদমই নেই → পুরো অর্ডার Pending (টাকা hold + Admin কে রিকোয়েস্ট)
+                        _po_create(user_id, _po_kind, show_name, quantity, price, db=db,
+                                   product_name=product_name)
+                        return
+                    # আংশিক: যতটুকু স্টকে আছে এখনই ডেলিভারি, বাকিটা Pending
+                    _po_rem = quantity - stock
+                    quantity = stock
+                    total_price = round(price * quantity, 2)
 
                 try:
                     # Stock file read ও write একই lock এর ভেতরে — safe ✅
@@ -25672,6 +26026,10 @@ def process_purchase(user_id, product_name, quantity, price, total_price, displa
                 # pending_product রাখো — user আবার কিনতে পারবে (Back চাপলে তখন মুছবে)
                 # ⚡ OPTIMIZED: শুধু user data update (পুরো DB নয়)
                 update_db_path(f"/users/{user_id}", db["users"][user_id])
+                if _po_rem > 0:
+                    # ⏳ স্টকের অংশ ডেলিভারি হয়ে গেছে — বাকিটার জন্য Pending অর্ডার + Admin রিকোয়েস্ট
+                    _po_create(user_id, _po_scope(product_name), show_name, _po_rem, price, db=db,
+                               product_name=product_name)
         # ── Lock ছেড়ে দেওয়ার পরে log করো ──
         try:
             bot.send_message(LOG_CHANNEL_ID,
@@ -28880,6 +29238,11 @@ def show_admin_panel(user_id):
         InlineBtn("🌐 ISP Manager", style="primary", callback_data="admin_ispk_manage")
     )
     markup.add(
+        InlineBtn(f"⏳ Pending Orders ({len(_po_load())})", style="primary", callback_data="admin_pndo_list")
+    )
+    if is_owner(user_id):
+        markup.add(InlineBtn("🤖 Auto Reply (আমার ID)", style="primary", callback_data="admin_ub_home"))
+    markup.add(
         InlineBtn("🚫 Trx id block", style="danger", callback_data="admin_trx_block")
     )
     markup.add(
@@ -30000,6 +30363,7 @@ def _bot_settings_view():
     )
     markup.row(InlineBtn("📞 Support Username", style="primary", callback_data="admin_bset_edit_support"))
     markup.row(InlineBtn("🌐 OTP Site Link", style="primary", callback_data="admin_bset_edit_otpsite"))
+    markup.row(InlineBtn(f"📢 Force Join Channels ({len(CHANNELS)})", style="primary", callback_data="admin_bset_ch"))
     markup.row(InlineBtn("🔙 Admin Panel", style="primary", callback_data="back_admin"))
     return text, markup
 
@@ -30050,6 +30414,10 @@ def _bot_settings_worker(call):
 def _bot_settings_worker_impl(call):
     uid = str(call.from_user.id)
     data = call.data
+
+    if data.startswith("admin_bset_ch"):
+        _fc_cb(call)
+        return
 
     if data == "admin_bset_mt":
         set_bot_setting("maintenance_mode", not is_maintenance_mode())
@@ -30149,6 +30517,848 @@ def admin_bot_setting_step(message, field):
         f"এখন থেকে বটের সব জায়গায় এটাই দেখাবে।",
         parse_mode="HTML", reply_markup=get_main_menu(uid))
     _send_bot_settings_view(uid)
+
+# ═══════════════════════════════════════════════════════════
+# 📢 FORCE JOIN CHANNELS — Bot Settings থেকে চ্যানেলের নাম / ID / লিংক সেট
+#    ডাটা: settings/force_channels (JSON লিস্ট [{"id","link","name"}]); restart এর পর
+#    apply_bot_settings_overrides() CHANNELS লিস্টে বসিয়ে দেয় (কোডের ডিফল্টের উপর)।
+#    জয়েন বাটনে চ্যানেলের নাম দেখায় (নাম না থাকলে আগের মতো "Join Channel N")।
+# ═══════════════════════════════════════════════════════════
+def _fc_save(chs):
+    """নতুন চ্যানেল লিস্ট সেভ + সব subscription cache মুছে ফেলো।"""
+    set_bot_setting("force_channels", json.dumps(chs, ensure_ascii=False))
+    try:
+        _sub_cache.clear()
+    except Exception:
+        pass
+
+def _fc_view():
+    chs = list(CHANNELS)
+    if chs:
+        lines = []
+        for i, ch in enumerate(chs, 1):
+            nm = _esc(ch.get("name") or f"Channel {i}")
+            lines.append(f"<b>{i}. {nm}</b>\n   🆔 <code>{_esc(ch['id'])}</code>\n   🔗 {_esc(ch['link'])}")
+        body = "\n\n".join(lines)
+    else:
+        body = "⚠️ কোনো চ্যানেল সেট নেই — Force Join এখন বন্ধ।"
+    text = ("📢 <b>Force Join Channels</b>\n\n" + body +
+            "\n\n<i>ইউজারকে এই চ্যানেলগুলোতে জয়েন না করা পর্যন্ত বট ব্যবহার করতে দেওয়া হবে না। "
+            "বটকে প্রতিটা চ্যানেলে <b>Admin</b> বানাতে হবে।</i>")
+    mk = types.InlineKeyboardMarkup(row_width=3)
+    for i, ch in enumerate(chs):
+        mk.row(InlineBtn(f"✏️ নাম #{i+1}", style="primary", callback_data=f"admin_bset_chn_{i}"),
+               InlineBtn(f"🔗 লিংক #{i+1}", style="primary", callback_data=f"admin_bset_chl_{i}"),
+               InlineBtn(f"🗑 #{i+1}", style="danger", callback_data=f"admin_bset_chd_{i}"))
+    mk.row(InlineBtn("➕ চ্যানেল যোগ করুন", style="success", callback_data="admin_bset_cha"))
+    mk.row(InlineBtn("🔙 Bot Settings", style="primary", callback_data="admin_bot_settings"))
+    return text, mk
+
+def _fc_show(uid, mid=None):
+    text, mk = _fc_view()
+    if mid:
+        try:
+            bot.edit_message_text(text, uid, mid, parse_mode="HTML", reply_markup=mk, disable_web_page_preview=True)
+            return
+        except Exception as e:
+            if "not modified" in str(e).lower():
+                return
+    bot.send_message(uid, text, parse_mode="HTML", reply_markup=mk, disable_web_page_preview=True)
+
+def _fc_norm_link(raw):
+    raw = (raw or "").strip()
+    if raw.startswith("@"):
+        raw = "https://t.me/" + raw[1:]
+    elif re.match(r"(?i)^(t\.me|telegram\.me)/", raw):
+        raw = "https://" + raw
+    return raw if re.fullmatch(r"(?i)https?://\S+", raw) else None
+
+def _fc_cb(call):
+    uid, mid, d = str(call.message.chat.id), call.message.message_id, call.data
+    if d == "admin_bset_ch":
+        _fc_show(uid, mid)
+    elif d == "admin_bset_cha":
+        msg = bot.send_message(uid, "➕ <b>নতুন চ্যানেলের নাম লিখুন</b>\n<i>(জয়েন বাটনে এটাই দেখাবে, যেমন: Main Channel)</i>",
+                               parse_mode="HTML", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _fc_add_name_step)
+    elif d.startswith("admin_bset_chn_") or d.startswith("admin_bset_chl_"):
+        i = int(d.rsplit("_", 1)[1])
+        if i >= len(CHANNELS):
+            _fc_show(uid, mid); return
+        if d.startswith("admin_bset_chn_"):
+            msg = bot.send_message(uid, f"✏️ <b>চ্যানেল #{i+1} এর নতুন নাম লিখুন</b>\nবর্তমান: <code>{_esc(CHANNELS[i].get('name') or '-')}</code>",
+                                   parse_mode="HTML", reply_markup=get_cancel_button(uid))
+            bot.register_next_step_handler(msg, _fc_edit_step, i, "name")
+        else:
+            msg = bot.send_message(uid, f"🔗 <b>চ্যানেল #{i+1} এর নতুন লিংক পাঠান</b>\nবর্তমান: {_esc(CHANNELS[i]['link'])}\n"
+                                        f"<i>(যেমন: https://t.me/yourchannel)</i>",
+                                   parse_mode="HTML", reply_markup=get_cancel_button(uid), disable_web_page_preview=True)
+            bot.register_next_step_handler(msg, _fc_edit_step, i, "link")
+    elif d.startswith("admin_bset_chd_"):
+        i = int(d.rsplit("_", 1)[1])
+        if i >= len(CHANNELS):
+            _fc_show(uid, mid); return
+        mk = types.InlineKeyboardMarkup(row_width=2)
+        mk.add(InlineBtn("✅ হ্যাঁ, মুছুন", style="danger", callback_data=f"admin_bset_chdy_{i}"),
+               InlineBtn("❌ না", style="primary", callback_data="admin_bset_ch"))
+        bot.edit_message_text(f"⚠️ <b>{_esc(CHANNELS[i].get('name') or f'Channel {i+1}')}</b> মুছে ফেলবেন?\n"
+                              f"(এই চ্যানেলে আর জয়েন বাধ্যতামূলক থাকবে না)", uid, mid, parse_mode="HTML", reply_markup=mk)
+    elif d.startswith("admin_bset_chdy_"):
+        i = int(d.rsplit("_", 1)[1])
+        chs = [dict(c) for c in CHANNELS]
+        if i < len(chs):
+            chs.pop(i)
+            _fc_save(chs)
+        _fc_show(uid, mid)
+
+def _fc_is_cancel(message):
+    return (message.text or "").strip() in ("❌ Cancel", LANG["en"]["cancel"], LANG["bn"]["cancel"])
+
+def _fc_add_name_step(message):
+    uid = str(message.chat.id)
+    if not is_owner(uid):
+        return
+    if _fc_is_cancel(message):
+        bot.send_message(uid, "❌ বাতিল করা হয়েছে।", reply_markup=get_main_menu(uid)); _fc_show(uid); return
+    name = (message.text or "").strip()
+    if not name or len(name) > 40:
+        msg = bot.send_message(uid, "❌ নাম ১-৪০ অক্ষরের মধ্যে দিন:", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _fc_add_name_step); return
+    msg = bot.send_message(uid,
+        "🆔 <b>চ্যানেলের @username অথবা Channel ID পাঠান</b>\n"
+        "<i>পাবলিক হলে: <code>@yourchannel</code>\nপ্রাইভেট হলে: <code>-100xxxxxxxxxx</code></i>\n\n"
+        "⚠️ বটকে আগে ওই চ্যানেলে <b>Admin</b> বানিয়ে নিন।",
+        parse_mode="HTML", reply_markup=get_cancel_button(uid))
+    bot.register_next_step_handler(msg, _fc_add_id_step, name)
+
+def _fc_add_id_step(message, name):
+    uid = str(message.chat.id)
+    if not is_owner(uid):
+        return
+    if _fc_is_cancel(message):
+        bot.send_message(uid, "❌ বাতিল করা হয়েছে।", reply_markup=get_main_menu(uid)); _fc_show(uid); return
+    raw = (message.text or "").strip()
+    raw = re.sub(r"(?i)^(https?://)?(t\.me|telegram\.me)/", "@", raw)
+    if not (raw.startswith("@") or re.fullmatch(r"-?\d{5,20}", raw)):
+        msg = bot.send_message(uid, "❌ <code>@username</code> অথবা <code>-100...</code> ID দিন:",
+                               parse_mode="HTML", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _fc_add_id_step, name); return
+    try:
+        chat = bot.get_chat(raw)
+    except Exception as e:
+        msg = bot.send_message(uid, f"❌ চ্যানেলটা পাওয়া যায়নি বা বট ওখানে নেই (<code>{_esc(e)}</code>)।\n"
+                                    f"বটকে Admin বানিয়ে আবার ID/username পাঠান:",
+                               parse_mode="HTML", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _fc_add_id_step, name); return
+    cid = str(chat.id)
+    auto = f"https://t.me/{chat.username}" if getattr(chat, "username", None) else ""
+    hint = (f"\n\nপাবলিক লিংক পাওয়া গেছে: {auto}\nএটাই ব্যবহার করতে <code>auto</code> লিখুন, নাহলে অন্য লিংক পাঠান।" if auto
+            else "\n\nএটা প্রাইভেট চ্যানেল — <b>Invite লিংক</b> পাঠান (যেমন: https://t.me/+AbCd...)।")
+    msg = bot.send_message(uid, f"✅ চ্যানেল পাওয়া গেছে: <b>{_esc(chat.title or cid)}</b>\n🆔 <code>{cid}</code>{hint}",
+                           parse_mode="HTML", reply_markup=get_cancel_button(uid), disable_web_page_preview=True)
+    bot.register_next_step_handler(msg, _fc_add_link_step, name, cid, auto)
+
+def _fc_add_link_step(message, name, cid, auto):
+    uid = str(message.chat.id)
+    if not is_owner(uid):
+        return
+    if _fc_is_cancel(message):
+        bot.send_message(uid, "❌ বাতিল করা হয়েছে।", reply_markup=get_main_menu(uid)); _fc_show(uid); return
+    raw = (message.text or "").strip()
+    link = auto if (raw.lower() == "auto" and auto) else _fc_norm_link(raw)
+    if not link:
+        msg = bot.send_message(uid, "❌ সঠিক লিংক দিন (<code>https://t.me/...</code>):",
+                               parse_mode="HTML", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _fc_add_link_step, name, cid, auto); return
+    chs = [dict(c) for c in CHANNELS]
+    if any(str(c["id"]) == cid for c in chs):
+        bot.send_message(uid, "⚠️ এই চ্যানেল আগেই যোগ করা আছে।", reply_markup=get_main_menu(uid)); _fc_show(uid); return
+    chs.append({"id": cid, "link": link, "name": name})
+    _fc_save(chs)
+    bot.send_message(uid, f"✅ <b>{_esc(name)}</b> যোগ হয়েছে! এখন থেকে এটাতে জয়েন বাধ্যতামূলক।",
+                     parse_mode="HTML", reply_markup=get_main_menu(uid))
+    _fc_show(uid)
+
+def _fc_edit_step(message, i, field):
+    uid = str(message.chat.id)
+    if not is_owner(uid):
+        return
+    if _fc_is_cancel(message):
+        bot.send_message(uid, "❌ বাতিল করা হয়েছে।", reply_markup=get_main_menu(uid)); _fc_show(uid); return
+    raw = (message.text or "").strip()
+    chs = [dict(c) for c in CHANNELS]
+    if i >= len(chs):
+        _fc_show(uid); return
+    if field == "name":
+        if not raw or len(raw) > 40:
+            msg = bot.send_message(uid, "❌ নাম ১-৪০ অক্ষরের মধ্যে দিন:", reply_markup=get_cancel_button(uid))
+            bot.register_next_step_handler(msg, _fc_edit_step, i, field); return
+        chs[i]["name"] = raw
+    else:
+        link = _fc_norm_link(raw)
+        if not link:
+            msg = bot.send_message(uid, "❌ সঠিক লিংক দিন (<code>https://t.me/...</code>):",
+                                   parse_mode="HTML", reply_markup=get_cancel_button(uid))
+            bot.register_next_step_handler(msg, _fc_edit_step, i, field); return
+        chs[i]["link"] = link
+    _fc_save(chs)
+    bot.send_message(uid, "✅ আপডেট হয়েছে!", reply_markup=get_main_menu(uid))
+    _fc_show(uid)
+
+def _ch_btn_text(ch, i, lang="en"):
+    """জয়েন বাটনের লেখা — চ্যানেলের নাম সেট থাকলে সেটা, নাহলে আগের ডিফল্ট লেখা।"""
+    nm = (ch.get("name") or "").strip()
+    if nm:
+        return f"📢 {nm}"
+    return LANG.get(lang, LANG["en"])["join_channel_btn"].format(n=i)
+
+
+# ═══════════════════════════════════════════════════════════
+# 🤖 MY-ID AUTO REPLY — আপনার নিজের Telegram ID (user account) এ কেউ মেসেজ দিলে বট অটো রিপ্লাই দেয়
+#    • Hi/Hello/Vai/Salam ইত্যাদি গ্রিটিং → Greeting মেসেজ
+#    • আপনি Offline হলে (ম্যানুয়াল বা সময়সূচি অনুযায়ী) → আপনার সেট করা Offline মেসেজ
+#    • Keyword Rules (যেমন "price" → দামের তালিকা)
+#    • একই ইউজারকে বারবার না পাঠাতে Cooldown; আপনি নিজে রিপ্লাই দিলে কিছুক্ষণ বট চুপ থাকে
+#    • শুধু প্রাইভেট চ্যাট; গ্রুপ/চ্যানেল/বট/Telegram সার্ভিস মেসেজে রিপ্লাই দেয় না
+#    ⚙️ Admin Panel → 🤖 Auto Reply থেকে API ID/Hash, Login ও সব মেসেজ সেট হয় (শুধু Owner)
+#    📦 লাগে: pip install telethon  (না থাকলে বাকি বট স্বাভাবিক চলে, শুধু এই ফিচার বন্ধ থাকে)
+# ═══════════════════════════════════════════════════════════
+try:
+    import asyncio as _ub_asyncio
+    from telethon import TelegramClient as _UbClient, events as _ub_events
+    from telethon.sessions import StringSession as _UbStringSession
+    _UB_OK = True
+except Exception:
+    _UB_OK = False
+
+_UB_LOCK = threading.RLock()
+_UB_LOOP = None
+_ub_client = None
+_ub_login = {}          # {admin_uid: {"c": client, "phone": str, "hash": str}}
+_ub_cool = {}           # {(sender_id, kind): last_reply_ts}
+_ub_last_out = {}       # {chat_id: আমি নিজে সর্বশেষ কখন লিখেছি}
+_ub_self_send = {}      # {chat_id: বট নিজে সর্বশেষ কখন অটো-রিপ্লাই পাঠিয়েছে}
+_ub_state = {"me": "", "err": ""}
+
+_UB_DEFAULT = {
+    "api_id": "", "api_hash": "", "session": "",
+    "enabled": False,
+    "mode": "auto",                 # online | offline | auto (সময়সূচি)
+    "hours": "10:00-23:00",         # auto মোডে এই সময়ে Online, বাকি সময় Offline (বাংলাদেশ সময়)
+    "greet_text": "Hello! 👋 Thanks for contacting me. Please tell me what you need — I'll reply shortly.",
+    "offline_text": "Hi! 🙏 I'm currently offline. Please wait — I'll reply as soon as I'm back. Thank you for your patience!",
+    "greet_words": ["hi", "hello", "hey", "hii", "hlw", "helo", "vai", "bhai", "bro", "salam", "assalamualaikum",
+                    "assalamu alaikum", "slm", "good morning", "good evening", "good afternoon",
+                    "হাই", "হ্যালো", "হেলো", "ভাই", "ভাইয়া", "সালাম", "আসসালামু আলাইকুম"],
+    "cooldown_h": 3,                # একই ইউজারকে একই ধরনের রিপ্লাই কত ঘণ্টা পরপর
+    "quiet_min": 10,                # আমি নিজে রিপ্লাই দিলে কত মিনিট বট চুপ থাকবে
+    "skip_contacts": False,         # True = আমার Contact এ থাকা মানুষকে অটো রিপ্লাই নয়
+    "rules": [],                    # [{"k": ["price","দাম"], "r": "reply text"}]
+}
+
+
+def _ub_cfg():
+    cfg = json.loads(json.dumps(_UB_DEFAULT))
+    try:
+        raw = (load_db().get("settings", {}) or {}).get("ub_cfg")
+        if raw:
+            saved = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(saved, dict):
+                cfg.update(saved)
+    except Exception as e:
+        logging.warning(f"ub cfg load error: {e}")
+    return cfg
+
+
+def _ub_save(cfg):
+    update_db_path("/settings/ub_cfg", json.dumps(cfg, ensure_ascii=False), _async=False)
+
+
+def _ub_norm(t):
+    t = re.sub(r"[^\w\sঀ-৿]", " ", (t or "").lower())
+    return " ".join(t.split())
+
+
+def _ub_is_greeting(cfg, text):
+    n = _ub_norm(text)
+    if not n or len(n) > 30:
+        return False
+    for w in cfg.get("greet_words", []):
+        w = _ub_norm(w)
+        if w and (n == w or n.startswith(w + " ")):
+            return True
+    return False
+
+
+def _ub_parse_hours(s):
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*", s or "")
+    if not m:
+        return None
+    a, b, c, d = map(int, m.groups())
+    if a > 23 or c > 23 or b > 59 or d > 59:
+        return None
+    return a * 60 + b, c * 60 + d
+
+
+def _ub_offline(cfg, now=None):
+    """এই মুহূর্তে আমি Offline কিনা।"""
+    mode = cfg.get("mode", "auto")
+    if mode == "offline":
+        return True
+    if mode == "online":
+        return False
+    rng = _ub_parse_hours(cfg.get("hours"))
+    if not rng:
+        return False
+    s, e = rng
+    n = now or datetime.now(BD_TZ)
+    cur = n.hour * 60 + n.minute
+    online = (s <= cur < e) if s <= e else (cur >= s or cur < e)
+    return not online
+
+
+def _ub_pick_reply(cfg, text, offline):
+    """(reply, kind) অথবা (None, None)।"""
+    if offline:
+        return cfg.get("offline_text"), "off"
+    nt = _ub_norm(text)
+    for i, r in enumerate(cfg.get("rules", [])):
+        if any(_ub_norm(k) and _ub_norm(k) in nt for k in r.get("k", [])):
+            return r.get("r"), f"rule{i}"
+    if _ub_is_greeting(cfg, text):
+        return cfg.get("greet_text"), "greet"
+    return None, None
+
+
+async def _ub_on_message(event):
+    try:
+        cfg = _ub_cfg()
+        if not cfg.get("enabled"):
+            return
+        now = _time_module.time()
+        if event.out:
+            if now - _ub_self_send.get(event.chat_id, 0) > 15:     # বটের নিজের পাঠানো নয় — আমি লিখেছি
+                _ub_last_out[event.chat_id] = now
+            return
+        if not event.is_private:
+            return
+        sender = await event.get_sender()
+        if (not sender or getattr(sender, "bot", False) or getattr(sender, "is_self", False)
+                or getattr(sender, "id", 0) == 777000):
+            return
+        if cfg.get("skip_contacts") and getattr(sender, "contact", False):
+            return
+        if now - _ub_last_out.get(event.chat_id, 0) < float(cfg.get("quiet_min", 10)) * 60:
+            return                                              # আমি এখনই কথা বলছি — বট চুপ
+        reply, kind = _ub_pick_reply(cfg, event.raw_text or "", _ub_offline(cfg))
+        if not reply:
+            return
+        key = (sender.id, kind)
+        if now - _ub_cool.get(key, 0) < float(cfg.get("cooldown_h", 3)) * 3600:
+            return
+        _ub_cool[key] = now
+        _ub_self_send[event.chat_id] = now
+        try:
+            async with event.client.action(event.chat_id, "typing"):
+                await _ub_asyncio.sleep(random.uniform(1.0, 2.5))
+        except Exception:
+            pass
+        _ub_self_send[event.chat_id] = _time_module.time()
+        await event.respond(reply)
+    except Exception as e:
+        logging.warning(f"ub on_message error: {e}")
+
+
+def _ub_get_loop():
+    global _UB_LOOP
+    with _UB_LOCK:
+        if _UB_LOOP is None:
+            loop = _ub_asyncio.new_event_loop()
+            def _runner():
+                _ub_asyncio.set_event_loop(loop)
+                loop.run_forever()
+            threading.Thread(target=_runner, daemon=True, name="ub-loop").start()
+            _UB_LOOP = loop
+        return _UB_LOOP
+
+
+def _ub_run(coro, timeout=60):
+    return _ub_asyncio.run_coroutine_threadsafe(coro, _ub_get_loop()).result(timeout)
+
+
+async def _ub_activate(client):
+    global _ub_client
+    _ub_client = client
+    client.add_event_handler(_ub_on_message, _ub_events.NewMessage())
+    me = await client.get_me()
+    _ub_state["me"] = ("@" + me.username) if getattr(me, "username", None) else (me.first_name or str(me.id))
+    _ub_state["err"] = ""
+
+
+def _ub_stop():
+    global _ub_client
+    c, _ub_client = _ub_client, None
+    if c:
+        try:
+            _ub_run(c.disconnect(), 15)
+        except Exception as e:
+            logging.warning(f"ub stop error: {e}")
+
+
+def _ub_start():
+    """সেভ করা session দিয়ে userbot চালু করে। (ok, message) রিটার্ন করে।"""
+    if not _UB_OK:
+        return False, "telethon ইনস্টল করা নেই (pip install telethon)"
+    cfg = _ub_cfg()
+    if not (cfg["api_id"] and cfg["api_hash"] and cfg["session"]):
+        return False, "API ID/Hash ও Login আগে সম্পন্ন করুন"
+    _ub_stop()
+    async def go():
+        c = _UbClient(_UbStringSession(cfg["session"]), int(cfg["api_id"]), cfg["api_hash"])
+        await c.connect()
+        if not await c.is_user_authorized():
+            await c.disconnect()
+            raise RuntimeError("Session মেয়াদোত্তীর্ণ — আবার Login করুন")
+        await _ub_activate(c)
+    try:
+        _ub_run(go(), 60)
+        return True, "OK"
+    except Exception as e:
+        _ub_state["err"] = str(e)
+        logging.error(f"ub start error: {e}")
+        return False, str(e)
+
+
+def _ub_autostart():
+    """বট চালু হওয়ার সময় (enabled থাকলে) ব্যাকগ্রাউন্ডে userbot চালু করে।"""
+    def _t():
+        try:
+            if _UB_OK and _ub_cfg().get("enabled"):
+                ok, msg = _ub_start()
+                print("✅ Auto Reply userbot started" if ok else f"⚠️ Auto Reply userbot start failed: {msg}")
+        except Exception as e:
+            logging.error(f"ub autostart error: {e}")
+    threading.Thread(target=_t, daemon=True).start()
+
+
+# ───────────────────────── Admin Panel ─────────────────────────
+def _ub_view():
+    cfg = _ub_cfg()
+    running = _ub_client is not None
+    off = _ub_offline(cfg)
+    mode = cfg["mode"]
+    mode_txt = {"online": "🟢 সবসময় Online", "offline": "🔴 সবসময় Offline",
+                "auto": f"🕒 Auto ({cfg['hours']} Online)"}.get(mode, mode)
+    text = ("🤖 <b>Auto Reply (আমার ID)</b>\n\n"
+            f"📦 Telethon: {'✅ আছে' if _UB_OK else '❌ নেই — <code>pip install telethon</code>'}\n"
+            f"🔑 API: {'✅ সেট' if cfg['api_id'] and cfg['api_hash'] else '❌ সেট নেই'}\n"
+            f"📱 Account: {('✅ ' + _esc(_ub_state['me'])) if running and _ub_state['me'] else ('🔐 Login করা আছে' if cfg['session'] else '❌ Login নেই')}\n"
+            f"⚙️ Status: {'🟢 চলছে' if running else '⚪ বন্ধ'}"
+            f"{(' — ⚠️ ' + _esc(_ub_state['err'])) if _ub_state['err'] and not running else ''}\n\n"
+            f"🕹 Mode: <b>{mode_txt}</b> → এখন <b>{'🔴 Offline' if off else '🟢 Online'}</b>\n"
+            f"⏱ Cooldown: {cfg['cooldown_h']} ঘণ্টা | 🤫 আমি রিপ্লাই দিলে চুপ: {cfg['quiet_min']} মিনিট\n"
+            f"👥 Contact কে রিপ্লাই: {'না' if cfg['skip_contacts'] else 'হ্যাঁ'}\n\n"
+            f"👋 <b>Greeting:</b>\n{_esc(cfg['greet_text'])}\n\n"
+            f"💤 <b>Offline:</b>\n{_esc(cfg['offline_text'])}\n\n"
+            f"📚 Keyword Rules: {len(cfg['rules'])} টি | 🔤 Greeting Words: {len(cfg['greet_words'])} টি")
+    mk = types.InlineKeyboardMarkup(row_width=2)
+    mk.row(InlineBtn("⏹ বন্ধ করুন" if cfg["enabled"] else "▶️ চালু করুন",
+                     style="danger" if cfg["enabled"] else "success", callback_data="admin_ub_tog"))
+    mk.row(InlineBtn(("✅ " if mode == "online" else "") + "🟢 Online", style="success", callback_data="admin_ub_mode_online"),
+           InlineBtn(("✅ " if mode == "offline" else "") + "🔴 Offline", style="danger", callback_data="admin_ub_mode_offline"),
+           InlineBtn(("✅ " if mode == "auto" else "") + "🕒 Auto", style="primary", callback_data="admin_ub_mode_auto"))
+    mk.row(InlineBtn("🕒 Online সময় সেট", style="primary", callback_data="admin_ub_edit_hours"),
+           InlineBtn("⏱ Cooldown", style="primary", callback_data="admin_ub_edit_cooldown_h"))
+    mk.row(InlineBtn("👋 Greeting মেসেজ", style="primary", callback_data="admin_ub_edit_greet_text"),
+           InlineBtn("💤 Offline মেসেজ", style="primary", callback_data="admin_ub_edit_offline_text"))
+    mk.row(InlineBtn("🔤 Greeting Words", style="primary", callback_data="admin_ub_edit_greet_words"),
+           InlineBtn("📚 Keyword Rules", style="primary", callback_data="admin_ub_rules"))
+    mk.row(InlineBtn("👥 Contact কে রিপ্লাই: " + ("OFF" if cfg["skip_contacts"] else "ON"),
+                     style="primary", callback_data="admin_ub_contacts"),
+           InlineBtn("🤫 চুপ থাকার সময়", style="primary", callback_data="admin_ub_edit_quiet_min"))
+    mk.row(InlineBtn("🔑 API ID / Hash", style="primary", callback_data="admin_ub_api"),
+           InlineBtn("📱 Login", style="success", callback_data="admin_ub_login"))
+    mk.row(InlineBtn("🚪 Logout", style="danger", callback_data="admin_ub_logout"),
+           InlineBtn("🔄 Refresh", style="primary", callback_data="admin_ub_home"))
+    mk.row(InlineBtn("🔙 Admin Panel", style="primary", callback_data="back_admin"))
+    return text, mk
+
+
+def _ub_show(uid, mid=None):
+    text, mk = _ub_view()
+    if mid:
+        try:
+            bot.edit_message_text(text, uid, mid, parse_mode="HTML", reply_markup=mk)
+            return
+        except Exception as e:
+            if "not modified" in str(e).lower():
+                return
+    bot.send_message(uid, text, parse_mode="HTML", reply_markup=mk)
+
+
+def _ub_rules_view():
+    cfg = _ub_cfg()
+    lines = [f"<b>{i+1}.</b> <code>{_esc(', '.join(r['k']))}</code> → {_esc(r['r'][:80])}" for i, r in enumerate(cfg["rules"])]
+    text = ("📚 <b>Keyword Rules</b>\n\nমেসেজে কীওয়ার্ড থাকলে নির্দিষ্ট রিপ্লাই যাবে (শুধু Online থাকা অবস্থায়)।\n\n"
+            + ("\n".join(lines) if lines else "<i>কোনো রুল নেই।</i>"))
+    mk = types.InlineKeyboardMarkup(row_width=1)
+    for i, r in enumerate(cfg["rules"]):
+        mk.add(InlineBtn(f"🗑 {i+1}. {r['k'][0]}", style="danger", callback_data=f"admin_ub_ruledel_{i}"))
+    mk.add(InlineBtn("➕ রুল যোগ করুন", style="success", callback_data="admin_ub_ruleadd"))
+    mk.add(InlineBtn("🔙 Back", style="primary", callback_data="admin_ub_home"))
+    return text, mk
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_ub_"))
+def handle_ub_callback(call):
+    if not is_owner(str(call.from_user.id)):
+        bot.answer_callback_query(call.id, "❌ শুধু Owner!", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    _EXECUTOR.submit(_ub_cb_worker, call)
+
+
+_UB_EDIT_HINT = {
+    "greet_text": "👋 নতুন <b>Greeting মেসেজ</b> লিখুন (Hi/Hello দিলে এটা যাবে)",
+    "offline_text": "💤 নতুন <b>Offline মেসেজ</b> লিখুন (আপনি Offline থাকলে সবাইকে এটা যাবে)",
+    "hours": "🕒 Online থাকার সময় লিখুন (বাংলাদেশ সময়, ২৪ ঘণ্টা ফরম্যাট)\nযেমন: <code>10:00-23:00</code>\nএর বাইরে সময়ে Offline মেসেজ যাবে।",
+    "cooldown_h": "⏱ একই ইউজারকে কত ঘণ্টা পরপর অটো রিপ্লাই যাবে? (যেমন: <code>3</code>)",
+    "quiet_min": "🤫 আপনি নিজে রিপ্লাই দিলে কত মিনিট বট চুপ থাকবে? (যেমন: <code>10</code>)",
+    "greet_words": "🔤 Greeting শব্দগুলো কমা দিয়ে লিখুন\nযেমন: <code>hi, hello, vai, salam, হাই</code>",
+}
+
+
+def _ub_cb_worker(call):
+    try:
+        uid, mid, d = str(call.message.chat.id), call.message.message_id, call.data
+        cfg = _ub_cfg()
+        if d == "admin_ub_home":
+            _ub_show(uid, mid)
+        elif d == "admin_ub_tog":
+            if not cfg["enabled"]:
+                ok, msg = _ub_start()
+                if not ok:
+                    bot.send_message(uid, f"❌ চালু করা যায়নি: <code>{_esc(msg)}</code>", parse_mode="HTML")
+                    _ub_show(uid, mid); return
+                cfg["enabled"] = True
+            else:
+                cfg["enabled"] = False
+                _ub_stop()
+            _ub_save(cfg)
+            _ub_show(uid, mid)
+        elif d.startswith("admin_ub_mode_"):
+            cfg["mode"] = d.rsplit("_", 1)[1]
+            _ub_save(cfg)
+            _ub_show(uid, mid)
+        elif d == "admin_ub_contacts":
+            cfg["skip_contacts"] = not cfg["skip_contacts"]
+            _ub_save(cfg)
+            _ub_show(uid, mid)
+        elif d.startswith("admin_ub_edit_"):
+            field = d[len("admin_ub_edit_"):]
+            if field not in _UB_EDIT_HINT:
+                return
+            cur = cfg[field] if field != "greet_words" else ", ".join(cfg["greet_words"])
+            msg = bot.send_message(uid, f"{_UB_EDIT_HINT[field]}\n\nবর্তমান:\n<code>{_esc(cur)}</code>",
+                                   parse_mode="HTML", reply_markup=get_cancel_button(uid))
+            bot.register_next_step_handler(msg, _ub_edit_step, field)
+        elif d == "admin_ub_api":
+            msg = bot.send_message(uid,
+                "🔑 <b>API ID</b> পাঠান (শুধু সংখ্যা)\n<i>my.telegram.org → API development tools থেকে পাবেন</i>",
+                parse_mode="HTML", reply_markup=get_cancel_button(uid))
+            bot.register_next_step_handler(msg, _ub_api_id_step)
+        elif d == "admin_ub_login":
+            if not _UB_OK:
+                bot.send_message(uid, "❌ সার্ভারে <code>telethon</code> ইনস্টল নেই। <code>pip install telethon</code> চালিয়ে বট restart দিন।", parse_mode="HTML"); return
+            if not (cfg["api_id"] and cfg["api_hash"]):
+                bot.send_message(uid, "⚠️ আগে 🔑 API ID / Hash সেট করুন।"); return
+            msg = bot.send_message(uid,
+                "📱 আপনার Telegram <b>ফোন নম্বর</b> পাঠান (দেশের কোডসহ)\nযেমন: <code>+8801712345678</code>",
+                parse_mode="HTML", reply_markup=get_cancel_button(uid))
+            bot.register_next_step_handler(msg, _ub_phone_step)
+        elif d == "admin_ub_logout":
+            _ub_stop()
+            try:
+                if cfg["session"] and _UB_OK:
+                    async def _lo():
+                        c = _UbClient(_UbStringSession(cfg["session"]), int(cfg["api_id"]), cfg["api_hash"])
+                        await c.connect()
+                        try:
+                            await c.log_out()
+                        finally:
+                            await c.disconnect()
+                    _ub_run(_lo(), 30)
+            except Exception as e:
+                logging.warning(f"ub logout error: {e}")
+            cfg["session"] = ""
+            cfg["enabled"] = False
+            _ub_save(cfg)
+            _ub_state["me"] = ""
+            bot.send_message(uid, "🚪 Logout হয়েছে। Auto Reply বন্ধ।")
+            _ub_show(uid)
+        elif d == "admin_ub_rules":
+            t_, m_ = _ub_rules_view()
+            bot.edit_message_text(t_, uid, mid, parse_mode="HTML", reply_markup=m_)
+        elif d == "admin_ub_ruleadd":
+            msg = bot.send_message(uid,
+                "📚 <b>কীওয়ার্ড</b> লিখুন (একাধিক হলে কমা দিয়ে)\nযেমন: <code>price, দাম, rate</code>",
+                parse_mode="HTML", reply_markup=get_cancel_button(uid))
+            bot.register_next_step_handler(msg, _ub_rule_kw_step)
+        elif d.startswith("admin_ub_ruledel_"):
+            i = int(d.rsplit("_", 1)[1])
+            if i < len(cfg["rules"]):
+                cfg["rules"].pop(i)
+                _ub_save(cfg)
+            t_, m_ = _ub_rules_view()
+            bot.edit_message_text(t_, uid, mid, parse_mode="HTML", reply_markup=m_)
+    except Exception as e:
+        logging.error(f"ub cb error: {e}\n{traceback.format_exc()}")
+
+
+def _ub_cancelled(message):
+    uid = str(message.chat.id)
+    if (message.text or "").strip() in ("❌ Cancel", LANG["en"]["cancel"], LANG["bn"]["cancel"]):
+        bot.send_message(uid, "❌ বাতিল করা হয়েছে।", reply_markup=get_main_menu(uid))
+        _ub_show(uid)
+        return True
+    return False
+
+
+def _ub_del(message):
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        pass
+
+
+def _ub_edit_step(message, field):
+    uid = str(message.chat.id)
+    if not is_owner(uid) or _ub_cancelled(message):
+        return
+    raw = (message.text or "").strip()
+    cfg = _ub_cfg()
+    err = None
+    if field in ("greet_text", "offline_text"):
+        if not raw or len(raw) > 1000:
+            err = "❌ মেসেজ ১-১০০০ অক্ষরের মধ্যে দিন:"
+        else:
+            cfg[field] = raw
+    elif field == "hours":
+        if not _ub_parse_hours(raw):
+            err = "❌ ফরম্যাট ঠিক নয়। যেমন: <code>10:00-23:00</code>"
+        else:
+            cfg["hours"] = raw.replace(" ", "")
+    elif field in ("cooldown_h", "quiet_min"):
+        try:
+            v = float(raw.translate(str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")))
+            if not (0 <= v <= 720):
+                raise ValueError
+            cfg[field] = int(v) if v == int(v) else v
+        except Exception:
+            err = "❌ সঠিক সংখ্যা দিন (০-৭২০):"
+    elif field == "greet_words":
+        words = [w.strip() for w in raw.split(",") if w.strip()]
+        if not words:
+            err = "❌ অন্তত একটা শব্দ দিন:"
+        else:
+            cfg["greet_words"] = words
+    if err:
+        msg = bot.send_message(uid, err, parse_mode="HTML", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _ub_edit_step, field)
+        return
+    _ub_save(cfg)
+    bot.send_message(uid, "✅ আপডেট হয়েছে!", reply_markup=get_main_menu(uid))
+    _ub_show(uid)
+
+
+def _ub_rule_kw_step(message):
+    uid = str(message.chat.id)
+    if not is_owner(uid) or _ub_cancelled(message):
+        return
+    kws = [k.strip() for k in (message.text or "").split(",") if k.strip()]
+    if not kws:
+        msg = bot.send_message(uid, "❌ অন্তত একটা কীওয়ার্ড দিন:", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _ub_rule_kw_step); return
+    msg = bot.send_message(uid, "💬 এই কীওয়ার্ডের জন্য <b>রিপ্লাই মেসেজ</b> লিখুন:", parse_mode="HTML",
+                           reply_markup=get_cancel_button(uid))
+    bot.register_next_step_handler(msg, _ub_rule_reply_step, kws)
+
+
+def _ub_rule_reply_step(message, kws):
+    uid = str(message.chat.id)
+    if not is_owner(uid) or _ub_cancelled(message):
+        return
+    r = (message.text or "").strip()
+    if not r or len(r) > 1000:
+        msg = bot.send_message(uid, "❌ রিপ্লাই ১-১০০০ অক্ষরের মধ্যে দিন:", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _ub_rule_reply_step, kws); return
+    cfg = _ub_cfg()
+    cfg["rules"].append({"k": kws, "r": r})
+    _ub_save(cfg)
+    bot.send_message(uid, "✅ রুল যোগ হয়েছে!", reply_markup=get_main_menu(uid))
+    t_, m_ = _ub_rules_view()
+    bot.send_message(uid, t_, parse_mode="HTML", reply_markup=m_)
+
+
+def _ub_api_id_step(message):
+    uid = str(message.chat.id)
+    if not is_owner(uid) or _ub_cancelled(message):
+        return
+    raw = (message.text or "").strip().translate(str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789"))
+    if not re.fullmatch(r"\d{4,12}", raw):
+        msg = bot.send_message(uid, "❌ API ID শুধু সংখ্যা হবে:", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _ub_api_id_step); return
+    msg = bot.send_message(uid, "🔐 এবার <b>API Hash</b> পাঠান (৩২ অক্ষর)", parse_mode="HTML",
+                           reply_markup=get_cancel_button(uid))
+    bot.register_next_step_handler(msg, _ub_api_hash_step, raw)
+
+
+def _ub_api_hash_step(message, api_id):
+    uid = str(message.chat.id)
+    if not is_owner(uid) or _ub_cancelled(message):
+        return
+    raw = (message.text or "").strip()
+    _ub_del(message)
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", raw):
+        msg = bot.send_message(uid, "❌ API Hash ৩২ অক্ষরের (০-৯, a-f) হবে। আবার পাঠান:", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _ub_api_hash_step, api_id); return
+    cfg = _ub_cfg()
+    if cfg["api_id"] != api_id or cfg["api_hash"] != raw:
+        cfg["session"] = ""          # নতুন API → পুরনো session অচল
+        cfg["enabled"] = False
+        _ub_stop()
+    cfg["api_id"], cfg["api_hash"] = api_id, raw
+    _ub_save(cfg)
+    bot.send_message(uid, "✅ API ID/Hash সেভ হয়েছে। এবার 📱 Login করুন।", reply_markup=get_main_menu(uid))
+    _ub_show(uid)
+
+
+def _ub_phone_step(message):
+    uid = str(message.chat.id)
+    if not is_owner(uid) or _ub_cancelled(message):
+        return
+    phone = re.sub(r"[\s\-]", "", message.text or "")
+    if not re.fullmatch(r"\+\d{8,15}", phone):
+        msg = bot.send_message(uid, "❌ দেশের কোডসহ নম্বর দিন, যেমন <code>+8801712345678</code>:", parse_mode="HTML",
+                               reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _ub_phone_step); return
+    cfg = _ub_cfg()
+    try:
+        async def go():
+            c = _UbClient(_UbStringSession(), int(cfg["api_id"]), cfg["api_hash"])
+            await c.connect()
+            sent = await c.send_code_request(phone)
+            return c, sent.phone_code_hash
+        old = _ub_login.pop(uid, None)
+        if old:
+            try:
+                _ub_run(old["c"].disconnect(), 10)
+            except Exception:
+                pass
+        c, h = _ub_run(go(), 60)
+    except Exception as e:
+        bot.send_message(uid, f"❌ কোড পাঠানো যায়নি: <code>{_esc(e)}</code>", parse_mode="HTML",
+                         reply_markup=get_main_menu(uid))
+        return
+    _ub_login[uid] = {"c": c, "phone": phone, "hash": h}
+    msg = bot.send_message(uid,
+        "📨 Telegram আপনার অ্যাকাউন্টে একটা <b>লগইন কোড</b> পাঠিয়েছে।\n\n"
+        "⚠️ কোডটা এখানে পাঠানোর সময় <b>অঙ্কগুলোর মাঝে ড্যাশ/স্পেস দিন</b>, যেমন <code>1-2-3-4-5</code> — "
+        "নাহলে Telegram নিরাপত্তার কারণে কোডটা বাতিল করে দিতে পারে।",
+        parse_mode="HTML", reply_markup=get_cancel_button(uid))
+    bot.register_next_step_handler(msg, _ub_code_step)
+
+
+def _ub_login_cleanup(uid):
+    st = _ub_login.pop(uid, None)
+    if st:
+        try:
+            _ub_run(st["c"].disconnect(), 10)
+        except Exception:
+            pass
+
+
+def _ub_finish_login(uid):
+    st = _ub_login.pop(uid)
+    cfg = _ub_cfg()
+    cfg["session"] = st["c"].session.save()
+    cfg["enabled"] = True
+    _ub_save(cfg)
+    _ub_stop()
+    _ub_run(_ub_activate(st["c"]), 30)
+
+
+def _ub_code_step(message):
+    uid = str(message.chat.id)
+    if not is_owner(uid):
+        return
+    if _ub_cancelled(message):
+        _ub_login_cleanup(uid); return
+    code = re.sub(r"\D", "", message.text or "")
+    _ub_del(message)
+    st = _ub_login.get(uid)
+    if not st:
+        bot.send_message(uid, "⚠️ সেশন নেই — আবার 📱 Login করুন।"); return
+    try:
+        async def go():
+            try:
+                await st["c"].sign_in(st["phone"], code, phone_code_hash=st["hash"])
+                return "ok"
+            except Exception as e:
+                if e.__class__.__name__ == "SessionPasswordNeededError":
+                    return "2fa"
+                raise
+        res = _ub_run(go(), 60)
+    except Exception as e:
+        name = e.__class__.__name__
+        if name == "PhoneCodeInvalidError":
+            msg = bot.send_message(uid, "❌ কোড ভুল। আবার পাঠান (ড্যাশসহ, যেমন 1-2-3-4-5):", reply_markup=get_cancel_button(uid))
+            bot.register_next_step_handler(msg, _ub_code_step); return
+        _ub_login_cleanup(uid)
+        bot.send_message(uid, f"❌ Login ব্যর্থ: <code>{_esc(name)}</code>\nকোডের মেয়াদ শেষ হলে নতুন করে 📱 Login করুন।",
+                         parse_mode="HTML", reply_markup=get_main_menu(uid))
+        return
+    if res == "2fa":
+        msg = bot.send_message(uid, "🔐 আপনার <b>Two-Step Verification পাসওয়ার্ড</b> পাঠান (পাঠানোর পর মেসেজ মুছে দেওয়া হবে)",
+                               parse_mode="HTML", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, _ub_pw_step); return
+    _ub_login_done(uid)
+
+
+def _ub_pw_step(message):
+    uid = str(message.chat.id)
+    if not is_owner(uid):
+        return
+    if _ub_cancelled(message):
+        _ub_login_cleanup(uid); return
+    pw = message.text or ""
+    _ub_del(message)
+    st = _ub_login.get(uid)
+    if not st:
+        bot.send_message(uid, "⚠️ সেশন নেই — আবার 📱 Login করুন।"); return
+    try:
+        _ub_run(st["c"].sign_in(password=pw), 60)
+    except Exception as e:
+        if e.__class__.__name__ == "PasswordHashInvalidError":
+            msg = bot.send_message(uid, "❌ পাসওয়ার্ড ভুল। আবার পাঠান:", reply_markup=get_cancel_button(uid))
+            bot.register_next_step_handler(msg, _ub_pw_step); return
+        _ub_login_cleanup(uid)
+        bot.send_message(uid, f"❌ Login ব্যর্থ: <code>{_esc(e.__class__.__name__)}</code>", parse_mode="HTML",
+                         reply_markup=get_main_menu(uid))
+        return
+    _ub_login_done(uid)
+
+
+def _ub_login_done(uid):
+    try:
+        _ub_finish_login(uid)
+    except Exception as e:
+        bot.send_message(uid, f"❌ চালু করা যায়নি: <code>{_esc(e)}</code>", parse_mode="HTML", reply_markup=get_main_menu(uid))
+        return
+    bot.send_message(uid, f"✅ <b>Login সফল!</b> {_esc(_ub_state['me'])} এ Auto Reply চালু হয়েছে।",
+                     parse_mode="HTML", reply_markup=get_main_menu(uid))
+    _ub_show(uid)
+
 
 # ═══════════════════════════════════════════════════════════
 # 📋 UNSOLD STOCK EXPORT — local (xlsx) stock আছে এমন সব প্রোডাক্ট
@@ -30790,7 +32000,7 @@ def _callback_worker_impl(call):
                 _is_missing = ch in _missing
                 _icon = "❌" if _is_missing else "✅"
                 _fail_markup.add(InlineBtn(
-                    f"{_icon} Channel {i} — {'Join করুন' if _is_missing else 'Joined'}", style="success",
+                    f"{_icon} {(ch.get('name') or f'Channel {i}')} — {'Join করুন' if _is_missing else 'Joined'}", style="success",
                     url=ch["link"]
                 ))
             _fail_markup.add(InlineBtn(
@@ -30913,7 +32123,7 @@ def _callback_worker_impl(call):
             # Join করেননি → join করতে বলো
             join_markup = types.InlineKeyboardMarkup(row_width=1)
             for i, ch in enumerate(CHANNELS, 1):
-                join_markup.add(InlineBtn(f"📢 Channel {i} তে Join করুন", style="success", url=ch["link"]))
+                join_markup.add(InlineBtn((f"📢 {ch['name']} — Join করুন" if ch.get("name") else f"📢 Channel {i} তে Join করুন"), style="success", url=ch["link"]))
             join_markup.add(InlineBtn("✅ Join করেছি", style="success", callback_data="goodbye_come_back"))
             try:
                 bot.edit_message_text(
@@ -30938,7 +32148,7 @@ def _callback_worker_impl(call):
             join_markup = types.InlineKeyboardMarkup(row_width=1)
             for i, ch in enumerate(CHANNELS, 1):
                 join_markup.add(InlineBtn(
-                    f"📢 Channel {i} তে Join করুন", style="success", url=ch["link"]))
+                    (f"📢 {ch['name']} — Join করুন" if ch.get("name") else f"📢 Channel {i} তে Join করুন"), style="success", url=ch["link"]))
             join_markup.add(InlineBtn(
                 "✅ Join করেছি — Verify", style="success", callback_data="check_join"))
             try:
@@ -40180,6 +41390,7 @@ if __name__ == "__main__":
 
     # ⚙️ Admin-সেট করা Payment Number / Support Username load করো
     apply_bot_settings_overrides()
+    _ub_autostart()      # 🤖 Auto Reply (আমার ID) — enabled থাকলে ব্যাকগ্রাউন্ডে চালু
     print(f"✅ Bot settings loaded | support=@{SUPPORT_USERNAME} | bkash={BKASH_NUMBER} | nagad={NAGAD_NUMBER} | rocket={ROCKET_NUMBER} | maintenance={is_maintenance_mode()}")
 
     # Admin-সেট করা keyboard button emoji load করো
