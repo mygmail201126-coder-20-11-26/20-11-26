@@ -8325,6 +8325,35 @@ def _schedule_periodic_flush():
         except Exception as e:
             logging.error(f"Periodic flush error: {e}")
 
+def _webhook_status_text():
+    """Telegram এর getWebhookInfo থেকে সংক্ষিপ্ত রিপোর্ট (টোকেন লুকানো)।"""
+    wi = bot.get_webhook_info()
+    url = (wi.url or "").replace(API_TOKEN, "<TOKEN>")
+    lines = [f"🔗 URL: <code>{_bm_html.escape(url) if url else 'খালি (webhook সেট নেই)'}</code>",
+             f"📥 Pending updates: <b>{wi.pending_update_count}</b>"]
+    err = getattr(wi, "last_error_message", None)
+    if err:
+        import datetime as _dt
+        _ed = getattr(wi, "last_error_date", None)
+        _when = _dt.datetime.utcfromtimestamp(_ed).strftime("%Y-%m-%d %H:%M:%S UTC") if _ed else "?"
+        lines.append(f"❌ last_error: <code>{_bm_html.escape(str(err))}</code> ({_when})")
+    if not wi.url:
+        lines.append("ℹ️ webhook খালি — USE_POLLING চালু আছে বা সেট করা ব্যর্থ হয়েছে।")
+    lines.append(f"⚙️ RAILWAY_URL: <code>{_bm_html.escape(RAILWAY_URL or 'সেট নেই')}</code> | PORT: <code>{os.environ.get('PORT', 'সেট নেই')}</code>")
+    return "\n".join(lines)
+
+
+@bot.message_handler(commands=['webhookinfo'])
+def cmd_webhookinfo(message):
+    """Admin only — Telegram এর দিক থেকে webhook এর অবস্থা ও শেষ এরর দেখায়।"""
+    if not is_admin(message.chat.id):
+        return
+    try:
+        bot.send_message(message.chat.id, "🔎 <b>Webhook Info</b>\n\n" + _webhook_status_text(), parse_mode="HTML")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ {type(e).__name__}: {e}")
+
+
 def start_sms_server():
     """SMS + Telegram Webhook — একই server এ দুটোই চলবে।
     Gunicorn থাকলে Gunicorn দিয়ে চালায় (production-grade, ultra fast)।
@@ -8365,8 +8394,22 @@ def start_sms_server():
             _tw.sleep(0.5)
             bot.set_webhook(url=WEBHOOK_URL, allowed_updates=_allowed)
             print("✅ Telegram Webhook set (URL লগে দেখানো হচ্ছে না — টোকেন সুরক্ষার জন্য)")
+            print(f"🌐 Webhook host: {RAILWAY_URL or '(RAILWAY_URL সেট নেই!)'} | Server PORT: {os.environ.get('PORT', '5000 (PORT ভেরিয়েবল নেই)')}")
         except Exception as e:
             print(f"❌ Webhook set failed: {e}")
+
+        def _webhook_selfcheck():
+            """৩০ সেকেন্ড পর Telegram কে জিজ্ঞেস করে — webhook এ কোনো এরর থাকলে Admin কে DM করে।"""
+            _time_module.sleep(30)
+            try:
+                txt = _webhook_status_text()
+                if "last_error" in txt:
+                    bot.send_message(ADMIN_ID, "⚠️ <b>Webhook সমস্যা</b>\n\n" + txt, parse_mode="HTML")
+                else:
+                    print("✅ Webhook self-check: কোনো এরর নেই")
+            except Exception as _e:
+                print(f"Webhook self-check error: {_e}")
+        threading.Thread(target=_webhook_selfcheck, daemon=True, name="webhook_selfcheck").start()
 
     PORT = int(os.environ.get("PORT", 5000))
 
