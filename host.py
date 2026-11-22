@@ -9104,7 +9104,7 @@ def _gic_detail_usd(dk, code):
     import time as _t
     ck = (dk, str(code))
     hit = _gic_usd_cache.get(ck)
-    if hit and _t.time() - hit[0] < 600:
+    if hit and _t.time() - hit[0] < 300:
         return hit[1]
     usd = None
     try:
@@ -9123,12 +9123,14 @@ def _gic_fill_prices(dk, items):
     """[(code,name,price)] → যেগুলোর price None (এবং Manual price নেই) সেগুলোর দাম ডিটেইল API থেকে সমান্তরালে ভরে।
     ফলে Profit % সেট করলে প্রতিটা সার্ভিসের নামের পাশে মোট দাম (API × রেট + Profit %) সবসময় দেখায়।"""
     items = list(items)
-    need = [i for i, (c, _n, p) in enumerate(items) if p is None and _gic_manual_price(dk, c) is None]
+    # লিস্ট API এর দাম সাধারণত "সবচেয়ে কম দাম" (অন্য provider এর হতে পারে) — তাই Manual price নেই এমন সবার
+    # জন্য ডিটেইল API থেকে এই Gmail/iCloud এর আসল দাম নেওয়া হয় (কেনার সময় ঠিক এই দামই চার্জ হয়)। ডিটেইল না পেলে লিস্টের দাম।
+    need = [i for i, (c, _n, p) in enumerate(items) if _gic_manual_price(dk, c) is None]
     if not need:
         return items
     from concurrent.futures import ThreadPoolExecutor as _TPE
     try:
-        with _TPE(max_workers=min(8, len(need))) as ex:
+        with _TPE(max_workers=min(10, len(need))) as ex:
             res = list(ex.map(lambda i: _gic_detail_usd(dk, items[i][0]), need))
         for i, usd in zip(need, res):
             if usd is not None:
@@ -9398,7 +9400,25 @@ def _gic_fetch_order(oid):
     return (od if isinstance(od, dict) else None), ""
 
 
+_gic_polling = set()       # যে অর্ডারের পোলিং থ্রেড এখন চলছে — একই অর্ডারে ডুপ্লিকেট থ্রেড/API রিকোয়েস্ট আটকাতে
+_gic_polling_lock = threading.Lock()
+
+
 def _gic_poll_worker(user_id, oid, chat_id):
+    """একই অর্ডারের জন্য একসাথে একটাই পোলিং থ্রেড চলবে (Next Code বারবার চাপলে নতুন থ্রেড জমে না)।"""
+    k = str(oid)
+    with _gic_polling_lock:
+        if k in _gic_polling:
+            return
+        _gic_polling.add(k)
+    try:
+        _gic_poll_worker_inner(user_id, oid, chat_id)
+    finally:
+        with _gic_polling_lock:
+            _gic_polling.discard(k)
+
+
+def _gic_poll_worker_inner(user_id, oid, chat_id):
     """কোড আসা পর্যন্ত (সর্বোচ্চ ~21 মিনিট) পোল করে। কোড এলে পাঠায়; কোড ছাড়া অর্ডার বন্ধ হলে auto refund।"""
     import time as _t
     deadline = _t.time() + 21 * 60
@@ -9931,11 +9951,45 @@ def _notp_country_usd(ct):
     return min(ps) if ps else None
 
 
+_notp_minp_cache = {}      # {service_code: (ts, usd)} — ইউজার আসলে কিনতে পারবে এমন সবচেয়ে কম দাম (২ মিনিট cache)
+
+
+def _notp_buyable_min_usd(code, fallback=None):
+    """দেশের লিস্টে (popular দেশ, স্টকে আছে) ইউজার আসলে যে সবচেয়ে কম দামে কিনতে পারবে সেই USD দাম।
+    না পেলে website এর price_from (fallback)।"""
+    import time as _t
+    hit = _notp_minp_cache.get(code)
+    if hit and _t.time() - hit[0] < 120:
+        return hit[1]
+    usd = None
+    try:
+        cdata, _e = _notp_country_data(code)
+        if cdata:
+            ps = [_notp_country_usd(cdata[cc]) for cc in NOTP_POPULAR if cc in cdata and cdata[cc].get("in_stock") is not False]
+            ps = [x for x in ps if x is not None]
+            usd = min(ps) if ps else None
+    except Exception as e:
+        logging.warning(f"notp buyable min error {code}: {e}")
+    if usd is None:
+        return fallback
+    _notp_minp_cache[code] = (_t.time(), usd)
+    return usd
+
+
 def _notp_services_view(uid):
     m = _notp_map()
     markup = types.InlineKeyboardMarkup(row_width=2)
+    _real = {}
+    try:
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        _ids = list(m.keys())
+        with _TPE(max_workers=min(10, max(1, len(_ids)))) as _ex:
+            for _i, _u in zip(_ids, _ex.map(lambda i: _notp_buyable_min_usd(m[i][0], m[i][2] if len(m[i]) > 2 else None), _ids)):
+                _real[_i] = _u
+    except Exception as e:
+        logging.warning(f"notp services real price error: {e}")
     def _lab(i, label, em):
-        usd = m[i][2] if len(m[i]) > 2 else None
+        usd = _real.get(i, m[i][2] if len(m[i]) > 2 else None)
         pb = _notp_price_bdt(usd, i)
         return f"{em} {label}" + (f" [{fmt_bdt_precise(pb)}৳]" if pb is not None else "")
     btns = [InlineBtn(_lab(i, label, em), style="primary", callback_data=f"notp_svc|{i}|1")
@@ -9945,7 +9999,8 @@ def _notp_services_view(uid):
     if not btns:
         return (_gic_t(uid, "⚠️ Could not load the service list. Please try again.", "⚠️ সার্ভিস লিস্ট আনা যায়নি। আবার চেষ্টা করুন।")), markup
     return ("📱 <b>Number OTP</b>\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-            + _gic_t(uid, "Which service do you need the number for?", "কোন সার্ভিসের জন্য নম্বর কিনবেন?")), markup
+            + _gic_t(uid, "Which service do you need the number for?\n💰 Price shown = lowest price you can pay (varies by country).",
+                     "কোন সার্ভিসের জন্য নম্বর কিনবেন?\n💰 দামটা সবচেয়ে কমে যে দামে কিনতে পারবেন সেটা (দেশ ভেদে আলাদা)।")), markup
 
 
 def _notp_countries_view(key, page, uid):
