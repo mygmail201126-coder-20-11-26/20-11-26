@@ -8066,7 +8066,9 @@ _sms_request_times = []
 # ===========================
 # RAILWAY URL — Webhook এর জন্য
 # ===========================
-RAILWAY_URL  = os.environ.get("RAILWAY_URL", "https://worker-production-1a27.up.railway.app")
+RAILWAY_URL  = (os.environ.get("RAILWAY_URL", "") or "").strip().rstrip("/")   # Railway Variables এ সেট করুন (যেমন https://xxxx.up.railway.app)
+if not RAILWAY_URL:
+    print("⚠️ RAILWAY_URL সেট নেই — Railway Variables এ RAILWAY_URL দিন (Webhook মোডে এটা বাধ্যতামূলক)")
 WEBHOOK_PATH = "/webhook/" + API_TOKEN
 WEBHOOK_URL  = RAILWAY_URL + WEBHOOK_PATH
 
