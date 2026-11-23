@@ -8535,6 +8535,7 @@ GMAIL_PLATFORMS = {
     "gm_owlproxy":  {"product": "Gmail Owl Proxy",  "name": "Owl Proxy", "emoji": "🦉"},
     "gm_oxylabs":   {"product": "Gmail Oxylabs",   "name": "Oxylabs",   "emoji": "🔶"},
     "gm_imo":       {"product": "Gmail Imo",       "name": "Imo",       "emoji": "💙"},
+    "gm_metaai":    {"product": "Gmail Meta AI",   "name": "Meta AI",   "emoji": "🧠"},
 }
 # প্রথম ৫টার বাইরে যেগুলো পরে যোগ হয়েছে — পুরোনো DB তেও একবার product বানাতে (gmail_products_init_v2)
 GMAIL_NEW_PLATFORM_KEYS = ["gm_amazon", "gm_whatsapp", "gm_twitter", "gm_discord", "gm_microsoft", "gm_pinterest",
@@ -8550,6 +8551,8 @@ GMAIL_NEW_PLATFORM_KEYS_V5 = ["gm_owlproxy"]
 GMAIL_NEW_PLATFORM_KEYS_V6 = ["gm_oxylabs"]
 # v7 — Imo (পুরোনো DB তে একবার product বানাতে — gmail_products_init_v7)
 GMAIL_NEW_PLATFORM_KEYS_V7 = ["gm_imo"]
+# v8 — Meta AI (পুরোনো DB তে একবার product বানাতে — gmail_products_init_v8)
+GMAIL_NEW_PLATFORM_KEYS_V8 = ["gm_metaai"]
 GMAIL_PRODUCT_TO_KEY = {m["product"]: k for k, m in GMAIL_PLATFORMS.items()}
 OTP_PAGE_PATH = "/otp"
 
@@ -8586,6 +8589,7 @@ GMAIL_SENDERS = {          # প্ল্যাটফর্ম -> প্রে�
     "gm_owlproxy": ["owlproxy.com"],              # Owl Proxy — owlproxy.com ও তার সাবডোমেইন (mail.owlproxy.com ইত্যাদি)
     "gm_oxylabs": ["oxylabs.io"],                 # Oxylabs — oxylabs.io ও তার সাবডোমেইন (mail.oxylabs.io ইত্যাদি)
     "gm_imo": ["imo.im"],                         # Imo — imo.im ও তার সাবডোমেইন (mail.imo.im ইত্যাদি)
+    "gm_metaai": ["auth.meta.com", "meta.com"],   # Meta AI — auth.meta.com (meta.com ও তার সাবডোমেইন)
 }
 
 GMAIL_BOXES = ["INBOX", "[Gmail]/Spam"]
@@ -8613,6 +8617,7 @@ _GM_CODE_RE = {            # প্ল্যাটফর্ম -> কোডে�
     "gm_owlproxy": r"(?<![\d.])(\d{4,8})(?![\d.])",
     "gm_oxylabs": r"(?<![\d.])(\d{4,8})(?![\d.])",
     "gm_imo": r"(?<![\d.])(\d{4,8})(?![\d.])",
+    "gm_metaai": r"(?<![\d.])(\d{5,8})(?![\d.])",
 }
 
 def _gm_decode(v):
@@ -27409,6 +27414,24 @@ def start_deposit_process(call):
     bot.answer_callback_query(call.id)  # ⚡ Instant ACK
     _EXECUTOR.submit(_deposit_start_worker, call)
 
+# ═══════════════════════════════════════════════════════════
+# 📱 BANGLA QR — Deposit মেথড
+#   • QR ছবি Admin → Bot Settings → "📱 Bangla QR সেট করুন" থেকে সেট হয়
+#     (Telegram file_id হিসেবে settings/bangla_qr_file_id তে সেভ হয়)
+#   • ON/OFF টগল: settings/dep_banglaqr_enabled
+#   • বাকি ফ্লো (Amount → TrxID → Admin Approve/Reject) বটের আগের ম্যানুয়াল ফ্লোই
+# ═══════════════════════════════════════════════════════════
+def get_bangla_qr_file_id(db=None):
+    if db is None:
+        db = load_db()
+    return str((db.get("settings", {}) or {}).get("bangla_qr_file_id") or "").strip()
+
+def bangla_qr_available(st=None):
+    """ON আছে এবং QR সেট করা আছে — তবেই ইউজারের মেথড লিস্টে বাটন দেখাবে।"""
+    if st is None:
+        st = load_db().get("settings", {}) or {}
+    return bool(st.get("dep_banglaqr_enabled", True)) and bool(str(st.get("bangla_qr_file_id") or "").strip())
+
 def _render_dep_method_select(user_id, message_id=None):
     """💳 Payment method বেছে নেওয়ার স্ক্রিন — message_id দিলে এডিট করবে, না দিলে নতুন পাঠাবে"""
     lang = get_user_lang(user_id)
@@ -27426,10 +27449,18 @@ def _render_dep_method_select(user_id, message_id=None):
         _mbtns.append(InlineBtn("🔴 Rocket (auto)", style="danger", callback_data="dep_method_rocket"))
     if _st.get("dep_binance_auto_enabled", True):
         _mbtns.append(InlineBtn("🔵 Binance (auto)", callback_data="dep_method_binance_auto"))
+    if bangla_qr_available(_st):
+        # 📱 Bangla QR — নরমাল (ডিফল্ট) কালার, কোনো style নেই
+        _mbtns.append(InlineBtn("📱 Bangla QR", callback_data="dep_method_banglaqr"))
+    # 🟡 Binance Crypto মেনু আর আলাদা নেই — Binance Pay ও BSC/BEP-20 বাটন সরাসরি
+    #    এই একই স্ক্রিনে দেখানো হয় (admin toggle মেনে)
+    if _st.get("dep_binance_crypto_enabled", True):
+        if _st.get("dep_binance_pay_enabled", True):
+            _mbtns.append(InlineBtn("💳 Binance Pay", callback_data="depbc_pay"))
+        if _st.get("dep_binance_bsc_enabled", True):
+            _mbtns.append(InlineBtn("🟡 BSC / BEP-20", callback_data="depbc_bsc"))
     for _i in range(0, len(_mbtns), 2):
         markup.row(*_mbtns[_i:_i + 2])
-    if _bc_crypto_available(_st):
-        markup.row(InlineBtn("🟡 Binance Crypto", callback_data="depbc_menu"))
     markup.row(InlineBtn(L["go_back"], callback_data="dep_back_to_origin"))
     # ✅ 'Make a Deposit' থেকে শুরু হওয়া প্রতিটা স্ক্রিনেই Cancel বাটন (লাল) থাকবে
     markup.row(InlineBtn(L["cancel"], callback_data="dep_cancel_flow"))
@@ -28144,6 +28175,13 @@ def handle_deposit_method(call):
             pass
         _EXECUTOR.submit(_render_dep_method_select, str(call.message.chat.id), call.message.message_id)
         return
+    if call.data == "dep_method_banglaqr" and not bangla_qr_available():
+        try:
+            bot.answer_callback_query(call.id, "⛔ This payment method is temporarily unavailable.", show_alert=True)
+        except Exception:
+            pass
+        _EXECUTOR.submit(_render_dep_method_select, str(call.message.chat.id), call.message.message_id)
+        return
     _dm_key = {"dep_method_bkash": "dep_bkash_enabled", "dep_method_nagad": "dep_nagad_enabled",
                "dep_method_rocket": "dep_rocket_enabled"}.get(call.data)
     if _dm_key and not load_db().get("settings", {}).get(_dm_key, True):
@@ -28165,11 +28203,60 @@ def _deposit_method_worker(call):
         "dep_method_nagad":        ("Nagad",       NAGAD_NUMBER,  True),
         "dep_method_rocket":       ("Rocket",      ROCKET_NUMBER, True),
         "dep_method_binance_auto": ("BinanceAuto", BINANCE_ID,    True),
+        "dep_method_banglaqr":     ("BanglaQR",    "",            False),
     }
     if call.data not in method_data:
         bot.answer_callback_query(call.id, "Invalid method!", show_alert=True); return
 
     method, account, is_auto = method_data[call.data]
+
+    # ══════════════════════════════════════════════════════
+    # 📱 BANGLA QR — QR ছবি পাঠাও, তারপর বাকি ফ্লো আগের মতো
+    # ══════════════════════════════════════════════════════
+    if method == "BanglaQR":
+        _lang = get_user_lang(user_id)
+        _qr_id = get_bangla_qr_file_id()
+        _mind = get_method_min_deposit(method)
+        if _lang == "bn":
+            _cap = (
+                "📱✨ <b>Bangla QR ডিপোজিট</b> ✨📱\n"
+                "─────────────────\n"
+                "উপরের QR কোড স্ক্যান করে টাকা পাঠান।\n"
+                "─────────────────\n"
+                f"💵 <i>সর্বনিম্ন ডিপোজিট: {_mind} BDT</i>\n\n"
+                "<b>কত টাকা পাঠিয়েছেন লিখুন:👇</b>"
+            )
+        else:
+            _cap = (
+                "📱✨ <b>Bangla QR DEPOSIT</b> ✨📱\n"
+                "─────────────────\n"
+                "Scan the QR code above and send the money.\n"
+                "─────────────────\n"
+                f"💵 <i>Minimum deposit: {_mind} BDT</i>\n\n"
+                "<b>Enter Your Amount:👇</b>"
+            )
+        try:
+            bot.send_photo(user_id, _qr_id, caption=_cap, parse_mode="HTML")
+        except Exception as _qe:
+            logging.error(f"BanglaQR send_photo failed | user={user_id} | {_qe}")
+            bot.send_message(user_id,
+                "⛔ Bangla QR is temporarily unavailable. Please try another method." if _lang != "bn"
+                else "⛔ Bangla QR সাময়িকভাবে বন্ধ আছে। অন্য মেথড ব্যবহার করুন।",
+                reply_markup=get_main_menu(user_id))
+            try:
+                bot.send_message(ADMIN_ID, "⚠️ Bangla QR ছবি পাঠানো যাচ্ছে না — Bot Settings থেকে QR আবার সেট করুন।")
+            except Exception:
+                pass
+            return
+        # মেথড-লিস্ট মেসেজটা সরিয়ে দাও (ছবি আলাদা মেসেজ হিসেবে গেছে)
+        try:
+            bot.delete_message(user_id, call.message.message_id)
+        except Exception:
+            pass
+        sent_msg = bot.send_message(user_id, "👇", reply_markup=get_cancel_button(user_id))
+        _dep_amount_clear_fail(user_id)
+        bot.register_next_step_handler(sent_msg, lambda m: ask_for_amount(m, method, account, is_auto))
+        return
 
     instruction_key = "dep_binance_auto_instruction" if method == "BinanceAuto" else "dep_instruction"
 
@@ -28285,8 +28372,8 @@ def ask_for_amount(message, method, account, is_auto):
         _min_dep = get_method_min_deposit(method)
         if amount < _min_dep:
             msg = bot.send_message(user_id,
-                (f"❌ <b>{method} এ সর্বনিম্ন ডিপোজিট {_min_dep} BDT!</b>\n\nআবার চেষ্টা করুন:" if lang == "bn"
-                 else f"❌ <b>Minimum deposit for {method} is {_min_dep} BDT!</b>\n\nPlease try again:"),
+                (f"❌ <b>{display_method_name(method)} এ সর্বনিম্ন ডিপোজিট {_min_dep} BDT!</b>\n\nআবার চেষ্টা করুন:" if lang == "bn"
+                 else f"❌ <b>Minimum deposit for {display_method_name(method)} is {_min_dep} BDT!</b>\n\nPlease try again:"),
                 parse_mode="HTML", reply_markup=get_cancel_button(user_id))
             bot.register_next_step_handler(msg, lambda m: ask_for_amount(m, method, account, is_auto)); return
 
@@ -28303,7 +28390,7 @@ def ask_for_amount(message, method, account, is_auto):
         display_amount = int(amount) if amount == int(amount) else amount
 
         msg = bot.send_message(user_id,
-            t(user_id, "dep_trxid_prompt", method=method, amount=display_amount),
+            t(user_id, "dep_trxid_prompt", method=display_method_name(method), amount=display_amount),
             parse_mode="HTML", reply_markup=get_cancel_button(user_id))
         bot.register_next_step_handler(msg,
             lambda m: process_deposit_request(m, method, account, amount, is_auto))
@@ -28650,18 +28737,18 @@ def _process_deposit_request_inner(message, user_id, method, account, amount, is
     update_db_path(f"/deposit_requests/{request_id}", deposit_record)
 
     bot.send_message(user_id,
-        t(user_id, "dep_submitted_manual", req_id=request_id, method=method,
+        t(user_id, "dep_submitted_manual", req_id=request_id, method=display_method_name(method),
           amount=amount, trx=transaction_id, date=current_time),
         parse_mode="HTML", reply_markup=get_main_menu(user_id))
 
     # Admin notification
     admin_message = (
         f"\n"
-        f"🔵 Binance <b>Deposit Request</b>\n"
+        f"{'📱 Bangla QR' if method == 'BanglaQR' else '🔵 Binance'} <b>Deposit Request</b>\n"
         f"\n\n"
         f"🆔 <b>Request ID:</b> <code>{request_id}</code>\n"
         f"👤 <b>User ID:</b> <code>{user_id}</code> (@{get_cached_username(user_id)})\n"
-        f"💳 <b>Method:</b> {method}\n"
+        f"💳 <b>Method:</b> {display_method_name(method)}\n"
         f"💰 <b>Amount:</b> {amount} BDT\n"
         f"🔑 <b>TrxID:</b> <code>{transaction_id}</code>\n"
         f"📅 <b>Date:</b> {current_time}\n"
@@ -30625,6 +30712,7 @@ def _bot_settings_view():
         f"🟠 Bkash: <code>{BKASH_NUMBER}</code> — {'🟢 ON' if _bst0.get('dep_bkash_enabled', True) else '🔴 OFF'} — Min: <b>{get_method_min_deposit('bkash', db)}</b>\n"
         f"🟢 Nagad: <code>{NAGAD_NUMBER}</code> — {'🟢 ON' if _bst0.get('dep_nagad_enabled', True) else '🔴 OFF'} — Min: <b>{get_method_min_deposit('nagad', db)}</b>\n"
         f"🔴 Rocket: <code>{ROCKET_NUMBER}</code> — {'🟢 ON' if _bst0.get('dep_rocket_enabled', True) else '🔴 OFF'} — Min: <b>{get_method_min_deposit('rocket', db)}</b>\n"
+        f"📱 Bangla QR: {'✅ QR সেট আছে' if get_bangla_qr_file_id(db) else '❌ QR সেট নেই'} — {'🟢 ON' if _bst0.get('dep_banglaqr_enabled', True) else '🔴 OFF'}\n"
         f"🔵 Binance ID: <code>{BINANCE_ID}</code>\n"
         f"💳 Binance Pay ID: <code>{BINANCE_PAY_UID or BINANCE_ID}</code>\n\n"
         "<i>Maintenance ON থাকলে শুধু Admin বট ব্যবহার করতে পারবে। "
@@ -30650,6 +30738,10 @@ def _bot_settings_view():
         InlineBtn("🟢 Nagad নম্বর", style="primary", callback_data="admin_bset_edit_nagad"),
     )
     markup.row(InlineBtn("🔴 Rocket নম্বর", style="primary", callback_data="admin_bset_edit_rocket"))
+    markup.row(
+        _pm_tg("Bangla QR", "dep_banglaqr_enabled", "admin_bset_tg_banglaqr"),
+        InlineBtn("📱 Bangla QR সেট করুন", style="primary", callback_data="admin_bset_qr"),
+    )
     markup.row(
         InlineBtn("💵 Bkash Min", style="primary", callback_data="admin_bset_edit_minbkash"),
         InlineBtn("💵 Nagad Min", style="primary", callback_data="admin_bset_edit_minnagad"),
@@ -30727,9 +30819,21 @@ def _bot_settings_worker_impl(call):
     elif data.startswith("admin_bset_tg_"):
         _pm = data[len("admin_bset_tg_"):]
         _pk = {"bkash": "dep_bkash_enabled", "nagad": "dep_nagad_enabled",
-               "rocket": "dep_rocket_enabled"}.get(_pm)
+               "rocket": "dep_rocket_enabled", "banglaqr": "dep_banglaqr_enabled"}.get(_pm)
         if _pk:
             set_bot_setting(_pk, not (load_db().get("settings", {}) or {}).get(_pk, True))
+
+    elif data == "admin_bset_qr":
+        _has = bool(get_bangla_qr_file_id())
+        msg = bot.send_message(uid,
+            "📱 <b>Bangla QR সেট করুন</b>\n\n"
+            f"বর্তমান: <b>{'✅ সেট আছে' if _has else '❌ সেট নেই'}</b>\n\n"
+            "নতুন QR কোডের <b>ছবি (Photo)</b> পাঠান।\n"
+            "ইউজার Bangla QR বাটনে ক্লিক করলে এই ছবিটাই দেখবে।\n"
+            "QR মুছে ফেলতে <code>remove</code> লিখুন।",
+            parse_mode="HTML", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, admin_bangla_qr_step)
+        return
 
     elif data.startswith("admin_bset_edit_"):
         field = data[len("admin_bset_edit_"):]
@@ -30765,6 +30869,41 @@ def _bot_settings_worker_impl(call):
     except Exception as _e:
         if "not modified" not in str(_e).lower():
             bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
+
+def admin_bangla_qr_step(message):
+    """📱 Bangla QR ছবি সেট করার next-step handler (Owner only)।"""
+    uid = str(message.chat.id)
+    if not is_owner(uid):
+        return
+    txt = (message.text or "").strip()
+    if txt in ("❌ Cancel", LANG["en"]["cancel"], LANG["bn"]["cancel"]):
+        bot.send_message(uid, "❌ বাতিল করা হয়েছে।", reply_markup=get_main_menu(uid))
+        _send_bot_settings_view(uid)
+        return
+    if txt.lower() in ("remove", "off", "clear", "delete"):
+        set_bot_setting("bangla_qr_file_id", "")
+        bot.send_message(uid, "✅ <b>Bangla QR মুছে ফেলা হয়েছে।</b>\n\nইউজারদের মেথড লিস্ট থেকে বাটনটা সরে যাবে।",
+                         parse_mode="HTML", reply_markup=get_main_menu(uid))
+        _send_bot_settings_view(uid)
+        return
+    file_id = None
+    if message.content_type == "photo" and message.photo:
+        file_id = message.photo[-1].file_id
+    elif (message.content_type == "document" and message.document
+          and str(getattr(message.document, "mime_type", "") or "").startswith("image/")):
+        file_id = message.document.file_id
+    if not file_id:
+        msg = bot.send_message(uid, "❌ <b>QR কোডের ছবি (Photo) পাঠান</b> — অথবা মুছতে <code>remove</code> লিখুন:",
+                               parse_mode="HTML", reply_markup=get_cancel_button(uid))
+        bot.register_next_step_handler(msg, admin_bangla_qr_step)
+        return
+    set_bot_setting("bangla_qr_file_id", file_id)
+    try:
+        bot.send_photo(uid, file_id, caption="✅ <b>Bangla QR সেট হয়েছে!</b>\n\nইউজাররা Deposit এ এই ছবিটাই দেখবে।",
+                       parse_mode="HTML", reply_markup=get_main_menu(uid))
+    except Exception:
+        bot.send_message(uid, "✅ <b>Bangla QR সেট হয়েছে!</b>", parse_mode="HTML", reply_markup=get_main_menu(uid))
+    _send_bot_settings_view(uid)
 
 def admin_bot_setting_step(message, field):
     """Bkash/Nagad/Rocket নম্বর বা Support Username সেট করার next-step handler।"""
@@ -37541,7 +37680,7 @@ def display_method_name(method):
     দেখিয়ে সবসময় real মেথডের নাম (যেমন 'Binance') দেখানো হয়। internal
     লজিক/কম্পারিজনে (if method == "BinanceAuto") এই ফাংশন ব্যবহার করা
     হয় না, শুধু ডিসপ্লে টেক্সটে ব্যবহার হয়।"""
-    return {"BinanceAuto": "Binance", "BinancePay": "Binance Pay", "BinanceBSC": "Binance BEP-20 (USDT)"}.get(method, method)
+    return {"BinanceAuto": "Binance", "BinancePay": "Binance Pay", "BinanceBSC": "Binance BEP-20 (USDT)", "BanglaQR": "Bangla QR"}.get(method, method)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -41069,6 +41208,17 @@ def auto_init_sub_products():
                     print(f"✅ Gmail product initialized (v7): {_gp}")
             db.setdefault("settings", {})["gmail_products_init_v7"] = True
             update_db_path("/settings/gmail_products_init_v7", True)
+            changed = True
+
+        # ── 📮 Gmail API — Meta AI সার্ভিস (v8; একবারই; admin ডিলিট করলে ফিরবে না) ──
+        if not (db.get("settings", {}) or {}).get("gmail_products_init_v8"):
+            for _gk in GMAIL_NEW_PLATFORM_KEYS_V8:
+                _gp = GMAIL_PLATFORMS[_gk]["product"]
+                if _gp not in db["products"]:
+                    db["products"][_gp] = 0
+                    print(f"✅ Gmail product initialized (v8): {_gp}")
+            db.setdefault("settings", {})["gmail_products_init_v8"] = True
+            update_db_path("/settings/gmail_products_init_v8", True)
             changed = True
 
         if changed:
